@@ -1,5346 +1,1714 @@
 require "import"
-import "android.app.*"
-import "android.content.*"
+import "android.speech.SpeechRecognizer"
+import "android.speech.RecognizerIntent"
+import "android.speech.tts.TextToSpeech"
 import "android.widget.*"
 import "android.view.*"
-import "android.os.*"
+import "android.view.accessibility.AccessibilityNodeInfo"
+import "android.app.*"
+import "android.content.*"
 import "android.net.Uri"
-import "android.util.Base64"
-import "android.widget.ScrollView"
-import "java.io.*"
-import "java.net.URL"
-import "java.net.HttpURLConnection"
-import "java.lang.Thread"
+import "java.io.File"
+import "android.os.*"
+import "android.os.Build"
+import "android.os.Handler"
+import "android.os.Looper"
 import "java.lang.Runnable"
-import "java.util.zip.ZipInputStream"
-import "java.util.zip.ZipEntry"
-import "org.json.JSONObject"
-import "org.json.JSONArray"
+import "java.util.Locale"
+import "android.graphics.Typeface"
+import "com.androlua.Http"
+import "android.app.AlertDialog"
+import "android.media.MediaPlayer"
+import "cjson"
 
-local mainHandler = Handler(Looper.getMainLooper())
+local service = service or accessibilityService
+local prefs = service.getSharedPreferences("VoiceInputV1_Prefs", Context.MODE_PRIVATE)
 
-local PREF_NAME = "github_acc_manager_exclusive_unique_cfg"
-local KEY_TOKEN = "key_github_user_pat_unique" -- tidak dipakai lagi untuk token; token di file
-local prefs = service.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+-- Inisialisasi tempPrefsData segera agar selalu sinkron
+local tempPrefsData = {}
+local function initTempPrefs()
+  tempPrefsData = {}
+  local all = prefs.getAll()
+  local it = all.entrySet().iterator()
+  while it.hasNext() do
+    local e = it.next()
+    tempPrefsData[tostring(e.getKey())] = e.getValue()
+  end
+end
+initTempPrefs()
 
-local FOLDER_KAUTSAR = "kautsar"
-local NAMA_FILE_TOKEN = "token.txt"
-
-local function jalurFolderKautsar()
-    return Environment.getExternalStorageDirectory().getAbsolutePath() .. "/" .. FOLDER_KAUTSAR
+local function getPref(k, d) 
+  if tempPrefsData[k] ~= nil then 
+    local v = tempPrefsData[k]
+    if type(v) == "boolean" then return v end
+    return tostring(v)
+  end
+  return prefs.getString(k, d) or d 
 end
 
-local function jalurFileToken()
-    return jalurFolderKautsar() .. "/" .. NAMA_FILE_TOKEN
+local function setPref(k, v) 
+  tempPrefsData[k] = tostring(v)
 end
 
-local function bacaToken()
-    local ok, hasil = pcall(function()
-        local f = File(jalurFileToken())
-        if not f.exists() or not f.isFile() then return "" end
-        local fis = FileInputStream(f)
-        local bos = ByteArrayOutputStream()
-        local buf = String(string.rep(" ", 2048)).getBytes()
-        local n = fis.read(buf)
-        while n ~= -1 do
-            bos.write(buf, 0, n)
-            n = fis.read(buf)
-        end
-        fis.close()
-        local teks = tostring(String(bos.toByteArray(), "UTF-8"))
-        return teks:match("^%s*(.-)%s*$") or ""
-    end)
-    if ok and type(hasil) == "string" then return hasil end
-    return ""
+local function getBool(k) 
+  if tempPrefsData[k] ~= nil then 
+    local v = tempPrefsData[k]
+    if type(v) == "boolean" then return v end
+    if v == "true" or v == "1" then return true else return false end
+  end
+  return prefs.getBoolean(k, false) 
 end
 
-local function simpanToken(teks)
-    local ok, err = pcall(function()
-        local dir = File(jalurFolderKautsar())
-        if not dir.exists() then
-            dir.mkdirs()
-        end
-        local f = File(jalurFileToken())
-        local fos = FileOutputStream(f)
-        fos.write(String(tostring(teks)).getBytes("UTF-8"))
-        fos.flush()
-        fos.close()
-    end)
-    return ok
+local function setBool(k, v) 
+  tempPrefsData[k] = v 
 end
 
-local function hapusToken()
-    pcall(function()
-        local f = File(jalurFileToken())
-        if f.exists() then f.delete() end
-    end)
-end
-local KEY_SIGN_ALIAS = "key_sign_alias"
-local KEY_SIGN_STORE_PASS = "key_sign_store_pass"
-local KEY_SIGN_KEY_PASS = "key_sign_key_pass"
-local KEY_SIGN_FILE = "key_sign_file"
-
-local menuUtama, tampilkanDialogLogin
-local PembuatAPK
-local buatRepoDialog, tambahFileRepoDialog, unggahDariMemoriHPDialog, konfirmUnggahBerkasDialog
-local daftarRepoSayaDialog, cariRepoDialog, kelolaRepoPilihanDialog, ubahPrivasiRepoDialog
-local bukaDirektoriRepoDialog, menuAksiFile, formEditIsiBerkas, gantiNamaRepoDialog, gantiNamaBerkasDialog, hapusRepoDialog
-local buatFolderRepoDialog, tambahBerkasDiFolderDialog
-local unduhRepoSebagaiZip, menuIntisari, buatIntisariBaru, kelolaJisDialog, detailJisDialog
-local menuTandaTangan, cariUnduhKeystore, unduhKeystoreKeDownload, pilihKeystoreDariHp, buatTandaTanganBaru, buatTandaTanganBaruForm, dialogPilihTandaTangan, unduhTandaTanganSaatIni, bukaIsiJis, editIsiJis
-local aktifkanGitHubPagesOtomatis
-local filterRepoDialog, multiSelectRepoDialog
-local jalankanOperasiBanyakRepo, prosesHapusBanyakRepo, prosesUbahPrivasiBanyakRepo, tampilkanHasilOperasiBanyak
-
-local URL_GENERATE_TOKEN = "https://github.com/settings/tokens/new?description=Aksesibilitas+Android&scopes=repo,delete_repo,workflow,gist"
-local URL_DAFTAR_AKUN = "https://github.com/signup"
-
-local function ambilWaktuTerakhirEdit(repoObj)
-    local pushed = repoObj.optString("pushed_at", "")
-    local updated = repoObj.optString("updated_at", "")
-    return (pushed > updated) and pushed or updated
-end
-
-local function formatUkuranBerkas(bytes)
-    if bytes < 1024 then
-        return bytes .. " B"
-    elseif bytes < 1024 * 1024 then
-        return string.format("%.1f KB", bytes / 1024)
+local function commitPrefs()
+  local editor = prefs.edit()
+  for k, v in pairs(tempPrefsData) do
+    if type(v) == "boolean" then
+      editor.putBoolean(k, v)
     else
-        return string.format("%.1f MB", bytes / (1024 * 1024))
+      editor.putString(k, tostring(v))
     end
+  end
+  editor.apply()
 end
 
-local function bacaBerkasKeBase64(fileObj)
-    local fis = FileInputStream(fileObj)
-    local bos = ByteArrayOutputStream()
-    local buf = String(string.rep(" ", 4096)).getBytes()
-    local n = fis.read(buf)
-    while n ~= -1 do
-        bos.write(buf, 0, n)
-        n = fis.read(buf)
-    end
-    fis.close()
-    return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
-end
-
-local function aturTombolHurufKecil(diag, teksPositif, teksNegatif, teksNetral)
-    pcall(function()
-        if teksPositif then
-            local btnPos = diag.getButton(DialogInterface.BUTTON_POSITIVE)
-            if btnPos then
-                btnPos.setTextAllCaps(false)
-                btnPos.setTransformationMethod(nil)
-                btnPos.setText(teksPositif)
-            end
-        end
-        if teksNegatif then
-            local btnNeg = diag.getButton(DialogInterface.BUTTON_NEGATIVE)
-            if btnNeg then
-                btnNeg.setTextAllCaps(false)
-                btnNeg.setTransformationMethod(nil)
-                btnNeg.setText(teksNegatif)
-            end
-        end
-        if teksNetral then
-            local btnNeu = diag.getButton(DialogInterface.BUTTON_NEUTRAL)
-            if btnNeu then
-                btnNeu.setTextAllCaps(false)
-                btnNeu.setTransformationMethod(nil)
-                btnNeu.setText(teksNetral)
-            end
-        end
-    end)
-end
-
-
-
-local function bukaBrowser(urlTarget)
-    local ok, err = pcall(function()
-        local intent = Intent(Intent.ACTION_VIEW, Uri.parse(urlTarget))
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        service.startActivity(intent)
-    end)
-    if not ok then
-        Toast.makeText(service, "Gagal buka browser: " .. tostring(err), Toast.LENGTH_SHORT).show()
-    end
-end
-
-local function salinKeClipboard(label, teks)
-    local clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE)
-    local clip = ClipData.newPlainText(label, teks)
-    clipboard.setPrimaryClip(clip)
-    if service.speak then service.speak(label .. " disalin.") end
-    Toast.makeText(service, label .. " disalin!", Toast.LENGTH_SHORT).show()
-end
-
-local function bagikanTautan(judul, teks)
-    local ok, err = pcall(function()
-        local intent = Intent(Intent.ACTION_SEND)
-        intent.setType("text/plain")
-        intent.putExtra(Intent.EXTRA_SUBJECT, judul)
-        intent.putExtra(Intent.EXTRA_TEXT, teks)
-        local chooser = Intent.createChooser(intent, "Bagikan via")
-        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        service.startActivity(chooser)
-    end)
-    if not ok then
-        Toast.makeText(service, "Gagal membagikan: " .. tostring(err), Toast.LENGTH_SHORT).show()
-    end
-end
-
-local MAX_PERCOBAAN_JARINGAN = 3
-local JEDA_DASAR_RETRY_MS = 1200
-
-local function apakahErrorJaringan(pesanError)
-    local p = tostring(pesanError)
-    if p:find("Gagal%. Kode:") then
-        return false
-    end
-    return true
-end
-
-local function kirimPermintaanGitHub(metode, endpoint, token, jsonBody, onSelesai, diam)
-    local progress
-    if not diam then
-        progress = ProgressDialog(service)
-        progress.setTitle("Menghubungkan")
-        progress.setMessage("Sedang memproses...")
-        progress.setCancelable(true)
-        progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        progress.show()
-    end
-
-    local function jalankanPercobaan(percobaanKe)
-        if progress and percobaanKe > 1 then
-            pcall(function()
-                progress.setMessage("Koneksi gagal, mencoba lagi (" .. percobaanKe .. "/" .. MAX_PERCOBAAN_JARINGAN .. ")...")
-            end)
-        end
-
-        Thread(Runnable{
-            run = function()
-                local ok, res = pcall(function()
-                    local url = URL(endpoint)
-                    local conn = url.openConnection()
-
-                    if metode == "PATCH" then
-                        local okPatch = pcall(function() conn.setRequestMethod("PATCH") end)
-                        if not okPatch then
-                            conn.setRequestMethod("POST")
-                            conn.setRequestProperty("X-HTTP-Method-Override", "PATCH")
-                        end
-                    else
-                        conn.setRequestMethod(metode)
-                    end
-
-                    conn.setRequestProperty("Authorization", "Bearer " .. token)
-                    conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                    conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
-                    conn.setRequestProperty("Content-Type", "application/json")
-                    conn.setConnectTimeout(15000)
-                    conn.setReadTimeout(20000)
-
-                    if jsonBody ~= nil and jsonBody ~= "" then
-                        conn.setDoOutput(true)
-                        local os = conn.getOutputStream()
-                        os.write(String(jsonBody).getBytes("UTF-8"))
-                        os.flush()
-                        os.close()
-                    end
-
-                    local respCode = conn.getResponseCode()
-                    local inputStream
-                    if respCode >= 200 and respCode < 300 then
-                        pcall(function() inputStream = conn.getInputStream() end)
-                    else
-                        pcall(function() inputStream = conn.getErrorStream() end)
-                    end
-
-                    local lines = {}
-                    if inputStream ~= nil then
-                        local reader = BufferedReader(InputStreamReader(inputStream, "UTF-8"))
-                        local line = reader.readLine()
-                        while line ~= nil do
-                            table.insert(lines, tostring(line))
-                            line = reader.readLine()
-                        end
-                        reader.close()
-                    end
-
-                    local hasil = table.concat(lines, "\n")
-                    if respCode >= 200 and respCode < 300 then
-                        return hasil
-                    else
-                        local pesanError = "Gagal. Kode: " .. respCode
-                        pcall(function()
-                            local jsonErr = JSONObject(hasil)
-                            pesanError = pesanError .. " (" .. jsonErr.optString("message", "") .. ")"
-                        end)
-                        error(pesanError)
-                    end
-                end)
-
-                if ok then
-                    mainHandler.post(Runnable{
-                        run = function()
-                            if progress then
-                                pcall(function() progress.dismiss() end)
-                            end
-                            onSelesai(true, res)
-                        end
-                    })
-                else
-                    if apakahErrorJaringan(res) and percobaanKe < MAX_PERCOBAAN_JARINGAN then
-                        mainHandler.postDelayed(Runnable{
-                            run = function()
-                                jalankanPercobaan(percobaanKe + 1)
-                            end
-                        }, JEDA_DASAR_RETRY_MS * percobaanKe)
-                    else
-                        mainHandler.post(Runnable{
-                            run = function()
-                                if progress then
-                                    pcall(function() progress.dismiss() end)
-                                end
-                                onSelesai(false, res)
-                            end
-                        })
-                    end
-                end
-            end
-        }).start()
-    end
-
-    jalankanPercobaan(1)
-end
-
-
-
-aktifkanGitHubPagesOtomatis = function(fullName, branchName, token, callback)
-    local sourceObj = JSONObject()
-    sourceObj.put("branch", branchName)
-    sourceObj.put("path", "/")
-
-    local payload = JSONObject()
-    payload.put("source", sourceObj)
-
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/pages"
-    kirimPermintaanGitHub("POST", endpoint, token, payload.toString(), function(ok, res)
-        if ok then
-            local pObj = JSONObject(res)
-            callback(true, pObj.optString("html_url", ""))
-        else
-            callback(false, tostring(res))
-        end
-    end, true)
-end
-
-daftarRepoSayaDialog = function(token, filterAktif)
-    filterAktif = filterAktif or "semua"
-
-    local endpoint = "https://api.github.com/user/repos?sort=updated&direction=desc&per_page=100&affiliation=owner"
-    kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-        if not ok then
-            Toast.makeText(service, "Gagal memuat: " .. tostring(res), Toast.LENGTH_LONG).show()
-            return
-        end
-
-        local okProses, hasilData = pcall(function()
-            local arr = JSONArray(res)
-            local total = arr.length()
-            local repoDataListSemua = {}
-            for i = 0, total - 1 do
-                table.insert(repoDataListSemua, arr.getJSONObject(i))
-            end
-
-            table.sort(repoDataListSemua, function(a, b)
-                return ambilWaktuTerakhirEdit(a) > ambilWaktuTerakhirEdit(b)
-            end)
-
-            local repoDataList = {}
-            for _, item in ipairs(repoDataListSemua) do
-                local isPrivate = item.optBoolean("private", false)
-                if filterAktif == "publik" then
-                    if not isPrivate then table.insert(repoDataList, item) end
-                elseif filterAktif == "privat" then
-                    if isPrivate then table.insert(repoDataList, item) end
-                else
-                    table.insert(repoDataList, item)
-                end
-            end
-
-            if filterAktif == "nama" then
-                table.sort(repoDataList, function(a, b)
-                    return a.optString("name", ""):lower() < b.optString("name", ""):lower()
-                end)
-            end
-
-            return {dataSemua = repoDataListSemua, data = repoDataList}
-        end)
-
-        if not okProses or not hasilData then
-            Toast.makeText(service, "Gagal memproses repositori.", Toast.LENGTH_SHORT).show()
-            return
-        end
-
-        local repoDataListSemua = hasilData.dataSemua
-        local repoDataList = hasilData.data
-        local totalSemua = #repoDataListSemua
-        local total = #repoDataList
-
-        if totalSemua == 0 then
-            if service.speak then service.speak("Belum ada repositori.") end
-            Toast.makeText(service, "Belum ada repositori.", Toast.LENGTH_SHORT).show()
-            menuUtama()
-            return
-        end
-
-        if service.speak then service.speak("Ditemukan " .. total .. " repositori.") end
-
-        local labelFilter = "Semua"
-        if filterAktif == "publik" then labelFilter = "Publik"
-        elseif filterAktif == "privat" then labelFilter = "Privat"
-        elseif filterAktif == "nama" then labelFilter = "Nama (A-Z)" end
-
-        local listItemsTampil = {
-            "Segarkan daftar",
-            "Filter: " .. labelFilter .. " (ketuk untuk ganti)",
-            "Pilih banyak (multi-select)"
-        }
-        local offsetItemTetap = #listItemsTampil
-
-        if total == 0 then
-            table.insert(listItemsTampil, "(tidak ada repositori dengan filter ini)")
-        else
-            for i, item in ipairs(repoDataList) do
-                local nama = item.optString("name", "")
-                local status = item.optBoolean("private", false) and "[privat]" or "[publik]"
-                table.insert(listItemsTampil, string.format("%d. %s %s", i, nama, status))
-            end
-        end
-
-        local b = AlertDialog.Builder(service)
-        b.setTitle("Repositori saya (" .. total .. "/" .. totalSemua .. ") - " .. labelFilter)
-        b.setItems(listItemsTampil, DialogInterface.OnClickListener{
-            onClick = function(dialog, which)
-                if which == 0 then
-                    if service.speak then service.speak("Menyegarkan daftar repositori.") end
-                    daftarRepoSayaDialog(token, filterAktif)
-                elseif which == 1 then
-                    filterRepoDialog(token, filterAktif)
-                elseif which == 2 then
-                    if total == 0 then
-                        Toast.makeText(service, "Tidak ada repositori untuk dipilih.", Toast.LENGTH_SHORT).show()
-                        daftarRepoSayaDialog(token, filterAktif)
-                    else
-                        multiSelectRepoDialog(token, repoDataList, filterAktif, {})
-                    end
-                elseif total == 0 then
-                    daftarRepoSayaDialog(token, filterAktif)
-                else
-                    local idx = which - offsetItemTetap + 1
-                    kelolaRepoPilihanDialog(repoDataList[idx], token)
-                end
-            end
-        })
-        b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-            onClick = function() menuUtama() end
-        })
-        local diag = b.create()
-        diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        diag.show()
-        aturTombolHurufKecil(diag, nil, "kembali", nil)
-    end)
-end
-
-filterRepoDialog = function(token, filterAktifSaatIni)
-    local opsi = {"Semua repositori", "Publik saja", "Privat saja", "Urutkan nama (A-Z)"}
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Filter repositori")
-    b.setItems(opsi, DialogInterface.OnClickListener{
-        onClick = function(dialog, which)
-            if which == 0 then
-                daftarRepoSayaDialog(token, "semua")
-            elseif which == 1 then
-                daftarRepoSayaDialog(token, "publik")
-            elseif which == 2 then
-                daftarRepoSayaDialog(token, "privat")
-            elseif which == 3 then
-                daftarRepoSayaDialog(token, "nama")
-            end
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() daftarRepoSayaDialog(token, filterAktifSaatIni) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-multiSelectRepoDialog = function(token, repoDataList, filterAktif, terpilihMap)
-    local items = {}
-    local jumlahTerpilih = 0
-    for i, item in ipairs(repoDataList) do
-        local nama = item.optString("name", "")
-        local fullName = item.optString("full_name", "")
-        local status = item.optBoolean("private", false) and "[privat]" or "[publik]"
-        local keteranganCentang = terpilihMap[fullName] and "dicentang" or "tidak dicentang"
-        if terpilihMap[fullName] then jumlahTerpilih = jumlahTerpilih + 1 end
-        table.insert(items, nama .. " " .. status .. ", " .. keteranganCentang)
-    end
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Pilih banyak repo (" .. jumlahTerpilih .. " terpilih)")
-    b.setItems(items, DialogInterface.OnClickListener{
-        onClick = function(dialog, which)
-            local item = repoDataList[which + 1]
-            local nama = item.optString("name", "")
-            local fullName = item.optString("full_name", "")
-            terpilihMap[fullName] = not terpilihMap[fullName]
-
-            if service.speak then
-                if terpilihMap[fullName] then
-                    service.speak(nama .. " dicentang")
-                else
-                    service.speak(nama .. " tidak dicentang")
-                end
-            end
-
-            multiSelectRepoDialog(token, repoDataList, filterAktif, terpilihMap)
-        end
-    })
-    b.setPositiveButton("hapus terpilih", DialogInterface.OnClickListener{
-        onClick = function()
-            local daftarFullName = {}
-            for fn, dipilih in pairs(terpilihMap) do
-                if dipilih then table.insert(daftarFullName, fn) end
-            end
-            if #daftarFullName == 0 then
-                Toast.makeText(service, "Belum ada repositori dipilih.", Toast.LENGTH_SHORT).show()
-                multiSelectRepoDialog(token, repoDataList, filterAktif, terpilihMap)
-                return
-            end
-
-            local konfirm = AlertDialog.Builder(service)
-            konfirm.setTitle("Hapus " .. #daftarFullName .. " repositori?")
-            konfirm.setMessage("Repositori berikut akan dihapus permanen dari GitHub:\n\n" .. table.concat(daftarFullName, "\n"))
-            konfirm.setPositiveButton("hapus semua", DialogInterface.OnClickListener{
-                onClick = function()
-                    prosesHapusBanyakRepo(token, daftarFullName, filterAktif)
-                end
-            })
-            konfirm.setNegativeButton("batal", DialogInterface.OnClickListener{
-                onClick = function() multiSelectRepoDialog(token, repoDataList, filterAktif, terpilihMap) end
-            })
-            local dK = konfirm.create()
-            dK.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-            dK.show()
-            aturTombolHurufKecil(dK, "hapus semua", "batal", nil)
-        end
-    })
-    b.setNeutralButton("ubah privasi terpilih", DialogInterface.OnClickListener{
-        onClick = function()
-            local daftarFullName = {}
-            for fn, dipilih in pairs(terpilihMap) do
-                if dipilih then table.insert(daftarFullName, fn) end
-            end
-            if #daftarFullName == 0 then
-                Toast.makeText(service, "Belum ada repositori dipilih.", Toast.LENGTH_SHORT).show()
-                multiSelectRepoDialog(token, repoDataList, filterAktif, terpilihMap)
-                return
-            end
-
-            local pilihStatus = AlertDialog.Builder(service)
-            pilihStatus.setTitle("Ubah privasi " .. #daftarFullName .. " repositori menjadi:")
-            pilihStatus.setItems({"Jadikan publik", "Jadikan privat"}, DialogInterface.OnClickListener{
-                onClick = function(d2, which2)
-                    local targetPrivat = (which2 == 1)
-                    prosesUbahPrivasiBanyakRepo(token, daftarFullName, targetPrivat, filterAktif)
-                end
-            })
-            pilihStatus.setNegativeButton("batal", DialogInterface.OnClickListener{
-                onClick = function() multiSelectRepoDialog(token, repoDataList, filterAktif, terpilihMap) end
-            })
-            local dP = pilihStatus.create()
-            dP.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-            dP.show()
-            aturTombolHurufKecil(dP, nil, "batal", nil)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() daftarRepoSayaDialog(token, filterAktif) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, "hapus terpilih", "kembali", "ubah privasi terpilih")
-end
-
-jalankanOperasiBanyakRepo = function(daftarFullName, judulOperasi, fungsiPerRepo, callbackSelesai)
-    local progress = ProgressDialog(service)
-    progress.setTitle(judulOperasi)
-    progress.setCancelable(false)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-
-    local total = #daftarFullName
-    local listSukses = {}
-    local listGagal = {}
-
-    local function lanjut(indexKe)
-        if indexKe > total then
-            pcall(function() progress.dismiss() end)
-            callbackSelesai(listSukses, listGagal)
-            return
-        end
-
-        local fullName = daftarFullName[indexKe]
-        pcall(function()
-            progress.setMessage("(" .. indexKe .. "/" .. total .. ") " .. fullName)
-        end)
-
-        fungsiPerRepo(fullName, function(ok, res)
-            if ok then
-                table.insert(listSukses, fullName)
-            else
-                table.insert(listGagal, fullName .. " (" .. tostring(res) .. ")")
-            end
-            lanjut(indexKe + 1)
-        end)
-    end
-
-    lanjut(1)
-end
-
-prosesHapusBanyakRepo = function(token, daftarFullName, filterAktif)
-    jalankanOperasiBanyakRepo(daftarFullName, "Menghapus repositori...", function(fullName, cb)
-        local endpoint = "https://api.github.com/repos/" .. fullName
-        kirimPermintaanGitHub("DELETE", endpoint, token, nil, cb, true)
-    end, function(listSukses, listGagal)
-        tampilkanHasilOperasiBanyak("Hapus repositori", listSukses, listGagal, token, filterAktif)
-    end)
-end
-
-prosesUbahPrivasiBanyakRepo = function(token, daftarFullName, targetPrivat, filterAktif)
-    jalankanOperasiBanyakRepo(daftarFullName, "Mengubah privasi...", function(fullName, cb)
-        local endpoint = "https://api.github.com/repos/" .. fullName
-        local payload = JSONObject()
-        payload.put("private", targetPrivat)
-        kirimPermintaanGitHub("PATCH", endpoint, token, payload.toString(), cb, true)
-    end, function(listSukses, listGagal)
-        tampilkanHasilOperasiBanyak("Ubah privasi repositori", listSukses, listGagal, token, filterAktif)
-    end)
-end
-
-tampilkanHasilOperasiBanyak = function(judul, listSukses, listGagal, token, filterAktif)
-    local pesan = "Berhasil: " .. #listSukses .. "\nGagal: " .. #listGagal
-    if #listGagal > 0 then
-        pesan = pesan .. "\n\nDetail gagal:\n" .. table.concat(listGagal, "\n")
-    end
-
-    if service.speak then
-        service.speak(judul .. " selesai. Berhasil " .. #listSukses .. ", gagal " .. #listGagal)
-    end
-
-    local d = AlertDialog.Builder(service)
-    d.setTitle(judul .. " selesai")
-    d.setMessage(pesan)
-    d.setPositiveButton("oke", DialogInterface.OnClickListener{
-        onClick = function() daftarRepoSayaDialog(token, filterAktif) end
-    })
-    local diag = d.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, "oke", nil, nil)
-end
-
-cariRepoDialog = function(token)
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local input = EditText(service)
-    input.setHint("Ketik nama repositori...")
-    input.setSingleLine(true)
-    layout.addView(input)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Cari repositori")
-    b.setMessage("Masukkan kata kunci nama repositori:")
-    b.setView(scroll)
-    b.setPositiveButton("cari", DialogInterface.OnClickListener{
-        onClick = function()
-            local query = tostring(input.getText()):match("^%s*(.-)%s*$"):lower()
-            if query == "" then
-                Toast.makeText(service, "Kata kunci tidak boleh kosong!", Toast.LENGTH_SHORT).show()
-                cariRepoDialog(token)
-                return
-            end
-
-            local endpoint = "https://api.github.com/user/repos?sort=updated&direction=desc&per_page=100&affiliation=owner"
-            kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-                if not ok then
-                    Toast.makeText(service, "Gagal mencari: " .. tostring(res), Toast.LENGTH_LONG).show()
-                    return
-                end
-
-                local okFilter, hasilFilter = pcall(function()
-                    local arr = JSONArray(res)
-                    local total = arr.length()
-                    local hasilData = {}
-
-                    for i = 0, total - 1 do
-                        local item = arr.getJSONObject(i)
-                        local nama = item.optString("name", "")
-                        if nama:lower():find(query, 1, true) then
-                            table.insert(hasilData, item)
-                        end
-                    end
-
-                    table.sort(hasilData, function(a, b)
-                        return ambilWaktuTerakhirEdit(a) > ambilWaktuTerakhirEdit(b)
-                    end)
-
-                    local hasilItems = {}
-                    for i, item in ipairs(hasilData) do
-                        local nama = item.optString("name", "")
-                        local status = item.optBoolean("private", false) and "[privat]" or "[publik]"
-                        table.insert(hasilItems, string.format("%d. %s %s", i, nama, status))
-                    end
-
-                    return {list = hasilItems, data = hasilData}
-                end)
-
-                if not okFilter or not hasilFilter or #hasilFilter.data == 0 then
-                    if service.speak then service.speak("Tidak ada repositori yang cocok.") end
-                    Toast.makeText(service, "Repositori tidak ditemukan.", Toast.LENGTH_SHORT).show()
-                    cariRepoDialog(token)
-                    return
-                end
-
-                local hasilItems = hasilFilter.list
-                local hasilData = hasilFilter.data
-
-                if service.speak then service.speak("Ditemukan " .. #hasilItems .. " repositori cocok.") end
-
-                local resB = AlertDialog.Builder(service)
-                resB.setTitle("Hasil pencarian (" .. #hasilItems .. ")")
-                resB.setItems(hasilItems, DialogInterface.OnClickListener{
-                    onClick = function(dRes, whichRes)
-                        kelolaRepoPilihanDialog(hasilData[whichRes + 1], token)
-                    end
-                })
-                resB.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                    onClick = function() cariRepoDialog(token) end
-                })
-                local dHasil = resB.create()
-                dHasil.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                dHasil.show()
-                aturTombolHurufKecil(dHasil, nil, "kembali", nil)
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() menuUtama() end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, "cari", "kembali", nil)
-end
-
-kelolaRepoPilihanDialog = function(repoObj, token)
-    local namaRepo = repoObj.optString("name", "")
-    local fullName = repoObj.optString("full_name", "")
-    local htmlUrl = repoObj.optString("html_url", "")
-    local isPrivate = repoObj.optBoolean("private", false)
-
-    local kembaliKeRepo = function() kelolaRepoPilihanDialog(repoObj, token) end
-    local subMenus = {
-        "1. Buka berkas",
-        "2. Tambah berkas (ketik teks)",
-        "3. Unggah berkas dari HP",
-        "4. Bangun APK dari repo ini",
-        "5. Cek status pembangunan APK",
-        "6. Unduh APK terbaru",
-        "7. Unduh repo sebagai ZIP",
-        "8. Unduh tanda tangan saat ini",
-        "9. Ubah status privasi (" .. (isPrivate and "saat ini privat" or "saat ini publik") .. ")",
-        "10. Ganti nama repo",
-        "11. Salin tautan repo",
-        "12. Bagikan tautan repo",
-        "13. Buka di browser",
-        "14. Hapus repositori"
-    }
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Repo: " .. namaRepo)
-    b.setItems(subMenus, DialogInterface.OnClickListener{
-        onClick = function(dialog, which)
-            if which == 0 then
-                bukaDirektoriRepoDialog(fullName, "", token, repoObj)
-            elseif which == 1 then
-                tambahFileRepoDialog(token, fullName, repoObj)
-            elseif which == 2 then
-                unggahDariMemoriHPDialog(fullName, token, repoObj, Environment.getExternalStorageDirectory().getAbsolutePath())
-            elseif which == 3 then
-                PembuatAPK.bangunUlang(fullName, token, kembaliKeRepo)
-            elseif which == 4 then
-                PembuatAPK.cekStatus(fullName, token, kembaliKeRepo)
-            elseif which == 5 then
-                PembuatAPK.ambilAPK(fullName, token, kembaliKeRepo)
-            elseif which == 6 then
-                unduhRepoSebagaiZip(repoObj, token, kembaliKeRepo)
-            elseif which == 7 then
-                unduhTandaTanganSaatIni(repoObj, token, kembaliKeRepo)
-            elseif which == 8 then
-                ubahPrivasiRepoDialog(repoObj, token)
-            elseif which == 9 then
-                gantiNamaRepoDialog(repoObj, token)
-            elseif which == 10 then
-                salinKeClipboard("Tautan repo", htmlUrl)
-            elseif which == 11 then
-                bagikanTautan("Repo: " .. namaRepo, htmlUrl)
-            elseif which == 12 then
-                bukaBrowser(htmlUrl)
-            elseif which == 13 then
-                hapusRepoDialog(repoObj, token)
-            end
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() daftarRepoSayaDialog(token) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-ubahPrivasiRepoDialog = function(repoObj, token)
-    local namaRepo = repoObj.optString("name", "")
-    local fullName = repoObj.optString("full_name", "")
-    local isPrivate = repoObj.optBoolean("private", false)
-    local targetStatusTeks = isPrivate and "publik" or "privat"
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Ubah privasi repo")
-    b.setMessage("Status saat ini: " .. (isPrivate and "Privat" or "Publik") ..
-        ".\n\nApakah Anda yakin ingin mengubah repositori ini menjadi " .. targetStatusTeks .. "?")
-    b.setPositiveButton("ubah privasi", DialogInterface.OnClickListener{
-        onClick = function()
-            local payload = JSONObject()
-            payload.put("private", not isPrivate)
-
-            local endpoint = "https://api.github.com/repos/" .. fullName
-            kirimPermintaanGitHub("PATCH", endpoint, token, payload.toString(), function(ok, res)
-                if ok then
-                    local updatedObj = JSONObject(res)
-                    if service.speak then service.speak("Status repositori diubah menjadi " .. targetStatusTeks) end
-                    Toast.makeText(service, "Privasi diubah menjadi " .. targetStatusTeks .. "!", Toast.LENGTH_SHORT).show()
-                    kelolaRepoPilihanDialog(updatedObj, token)
-                else
-                    Toast.makeText(service, "Gagal mengubah privasi: " .. tostring(res), Toast.LENGTH_LONG).show()
-                    kelolaRepoPilihanDialog(repoObj, token)
-                end
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() kelolaRepoPilihanDialog(repoObj, token) end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, "ubah privasi", "kembali", nil)
-end
-
-konfirmUnggahBerkasDialog = function(fullName, token, repoObj, pathSekarang, terpilih, targetPathInRepo)
-    targetPathInRepo = targetPathInRepo or ""
-    local layoutKonfirm = LinearLayout(service)
-    layoutKonfirm.setOrientation(LinearLayout.VERTICAL)
-    layoutKonfirm.setPadding(40, 20, 40, 10)
-
-    local lblTarget = TextView(service)
-    lblTarget.setText("Nama berkas di GitHub (boleh pakai folder, contoh: app/src/main/AndroidManifest.xml):")
-    layoutKonfirm.addView(lblTarget)
-
-    local defaultNama = terpilih.getName()
-    if targetPathInRepo ~= "" then
-        defaultNama = targetPathInRepo:gsub("/+$", "") .. "/" .. terpilih.getName()
-    end
-
-    local inputNamaRepo = EditText(service)
-    inputNamaRepo.setText(defaultNama)
-    inputNamaRepo.setSingleLine(true)
-    layoutKonfirm.addView(inputNamaRepo)
-
-    local scrollK = ScrollView(service.getApplicationContext())
-    scrollK.setFillViewport(true)
-    scrollK.addView(layoutKonfirm)
-
-    local dKonfirm = AlertDialog.Builder(service)
-    dKonfirm.setTitle("Unggah berkas terpilih")
-    dKonfirm.setMessage("Ukuran berkas: " .. formatUkuranBerkas(terpilih.length()))
-    dKonfirm.setView(scrollK)
-    dKonfirm.setPositiveButton("unggah berkas", DialogInterface.OnClickListener{
-        onClick = function()
-            local namaDiRepo = tostring(inputNamaRepo.getText()):match("^%s*(.-)%s*$")
-            if namaDiRepo == "" then namaDiRepo = terpilih.getName() end
-
-            local okB64, b64Data = pcall(function() return bacaBerkasKeBase64(terpilih) end)
-            if not okB64 then
-                Toast.makeText(service, "Gagal membaca berkas: " .. tostring(b64Data), Toast.LENGTH_SHORT).show()
-                return
-            end
-
-            local namaAman = (namaDiRepo:gsub("^/+", "")):gsub(" ", "%%20")
-            local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. namaAman
-            local kembaliRepo = function() kelolaRepoPilihanDialog(repoObj, token) end
-
-            local function kirimUnggah(shaLama)
-                local payload = JSONObject()
-                payload.put("message", (shaLama and "Perbarui " or "Unggah ") .. namaDiRepo .. " dari HP")
-                payload.put("content", b64Data)
-                if shaLama then payload.put("sha", shaLama) end
-
-                kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(sukses, resPut)
-                    if sukses then
-                        local rawUrl, htmlUrl = "", ""
-                        pcall(function()
-                            local contentObj = JSONObject(resPut).optJSONObject("content")
-                            if contentObj then
-                                rawUrl = contentObj.optString("download_url", "")
-                                htmlUrl = contentObj.optString("html_url", "")
-                            end
-                        end)
-                        PembuatAPK.setelahUnggah(fullName, token, repoObj, pathSekarang, namaDiRepo, rawUrl, htmlUrl, shaLama ~= nil)
-                    else
-                        PembuatAPK.tampilError("Gagal mengunggah berkas",
-                            "Berkas: " .. namaDiRepo .. "\nRepo: " .. fullName .. "\n\n" .. tostring(resPut),
-                            kembaliRepo)
-                    end
-                end)
-            end
-
-            PembuatAPK.ambilIdRunTerakhir(fullName, token, function(idAwal)
-                PembuatAPK.baselineRun[fullName] = idAwal
-                kirimPermintaanGitHub("GET", endpoint, token, nil, function(adaBerkas, resBerkas)
-                    local shaLama = nil
-                    if adaBerkas then
-                        pcall(function() shaLama = JSONObject(resBerkas).optString("sha", "") end)
-                        if shaLama == "" then shaLama = nil end
-                    end
-                    kirimUnggah(shaLama)
-                end, true)
-            end)
-        end
-    })
-    dKonfirm.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function()
-            unggahDariMemoriHPDialog(fullName, token, repoObj, pathSekarang, targetPathInRepo)
-        end
-    })
-    local dK = dKonfirm.create()
-    dK.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    dK.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    dK.show()
-    aturTombolHurufKecil(dK, "unggah berkas", "kembali", nil)
-end
-
-unggahDariMemoriHPDialog = function(fullName, token, repoObj, pathSekarang, targetPathInRepo)
-    targetPathInRepo = targetPathInRepo or ""
-    local dir = File(pathSekarang)
-    local files = dir.listFiles()
-    local menuItems = {}
-    local dataItems = {}
-
-    local rootPath = Environment.getExternalStorageDirectory().getAbsolutePath()
-    if pathSekarang ~= rootPath and pathSekarang ~= "/" then
-        table.insert(menuItems, "Folder .. (kembali ke folder sebelumnya)")
-        table.insert(dataItems, {tipe = "kembali", path = dir.getParent()})
-    end
-
-    if files ~= nil then
-        local daftarFolder = {}
-        local daftarBerkas = {}
-
-        for i = 0, #files - 1 do
-            local f = files[i]
-            local nama = f.getName()
-            if not nama:find("^%.") then
-                if f.isDirectory() then
-                    table.insert(daftarFolder, f)
-                else
-                    table.insert(daftarBerkas, f)
-                end
-            end
-        end
-
-        table.sort(daftarFolder, function(a, b) return a.getName():lower() < b.getName():lower() end)
-        table.sort(daftarBerkas, function(a, b) return a.getName():lower() < b.getName():lower() end)
-
-        for _, f in ipairs(daftarFolder) do
-            table.insert(menuItems, "Folder " .. f.getName())
-            table.insert(dataItems, {tipe = "dir", file = f})
-        end
-
-        for _, f in ipairs(daftarBerkas) do
-            local sz = formatUkuranBerkas(f.length())
-            table.insert(menuItems, "Berkas " .. f.getName() .. " (" .. sz .. ")")
-            table.insert(dataItems, {tipe = "file", file = f})
-        end
-    end
-
-    local judulUnggah = "Pilih dari HP: " .. dir.getName()
-    if targetPathInRepo ~= "" then
-        judulUnggah = judulUnggah .. " → " .. targetPathInRepo
-    end
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle(judulUnggah)
-    if #menuItems == 0 then
-        b.setMessage("Folder ini kosong.")
-    else
-        b.setItems(menuItems, DialogInterface.OnClickListener{
-            onClick = function(diag, which)
-                local item = dataItems[which + 1]
-                if item.tipe == "kembali" then
-                    unggahDariMemoriHPDialog(fullName, token, repoObj, item.path or rootPath, targetPathInRepo)
-                elseif item.tipe == "dir" then
-                    unggahDariMemoriHPDialog(fullName, token, repoObj, item.file.getAbsolutePath(), targetPathInRepo)
-                elseif item.tipe == "file" then
-                    konfirmUnggahBerkasDialog(fullName, token, repoObj, pathSekarang, item.file, targetPathInRepo)
-                end
-            end
-        })
-    end
-
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function()
-            if targetPathInRepo ~= "" then
-                bukaDirektoriRepoDialog(fullName, targetPathInRepo, token, repoObj)
-            else
-                kelolaRepoPilihanDialog(repoObj, token)
-            end
-        end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-hapusRepoDialog = function(repoObj, token)
-    local namaRepo = repoObj.optString("name", "")
-    local fullName = repoObj.optString("full_name", "")
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Hapus repositori?")
-    b.setMessage("Hapus '" .. namaRepo .. "' secara permanen dari GitHub?")
-    b.setPositiveButton("hapus repositori", DialogInterface.OnClickListener{
-        onClick = function()
-            local endpoint = "https://api.github.com/repos/" .. fullName
-            kirimPermintaanGitHub("DELETE", endpoint, token, nil, function(ok, res)
-                if ok then
-                    if service.speak then service.speak("Repositori " .. namaRepo .. " berhasil dihapus.") end
-                    Toast.makeText(service, "Repositori dihapus!", Toast.LENGTH_SHORT).show()
-                    daftarRepoSayaDialog(token)
-                else
-                    if service.speak then service.speak("Gagal menghapus.") end
-                    local err = tostring(res)
-                    if err:find("403") or err:find("404") then
-                        err = err .. "\n(Perlu izin token 'delete_repo')"
-                    end
-                    Toast.makeText(service, err, Toast.LENGTH_LONG).show()
-                    kelolaRepoPilihanDialog(repoObj, token)
-                end
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() kelolaRepoPilihanDialog(repoObj, token) end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, "hapus repositori", "kembali", nil)
-end
-
-gantiNamaRepoDialog = function(repoObj, token)
-    local namaLama = repoObj.optString("name", "")
-    local fullName = repoObj.optString("full_name", "")
-
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local lbl = TextView(service)
-    lbl.setText("Nama baru repo:")
-    layout.addView(lbl)
-
-    local input = EditText(service)
-    input.setText(namaLama)
-    input.setSingleLine(true)
-    layout.addView(input)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Ganti nama repo")
-    b.setView(scroll)
-    b.setPositiveButton("simpan nama baru", DialogInterface.OnClickListener{
-        onClick = function()
-            local baru = tostring(input.getText()):match("^%s*(.-)%s*$")
-            if baru == "" or baru == namaLama then
-                kelolaRepoPilihanDialog(repoObj, token)
-                return
-            end
-
-            local payload = JSONObject()
-            payload.put("name", baru)
-
-            local endpoint = "https://api.github.com/repos/" .. fullName
-            kirimPermintaanGitHub("PATCH", endpoint, token, payload.toString(), function(ok, res)
-                if ok then
-                    local updatedObj = JSONObject(res)
-                    if service.speak then service.speak("Nama repo diubah menjadi " .. baru) end
-                    Toast.makeText(service, "Nama repo diperbarui!", Toast.LENGTH_SHORT).show()
-                    kelolaRepoPilihanDialog(updatedObj, token)
-                else
-                    Toast.makeText(service, "Gagal: " .. tostring(res), Toast.LENGTH_LONG).show()
-                    kelolaRepoPilihanDialog(repoObj, token)
-                end
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() kelolaRepoPilihanDialog(repoObj, token) end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "simpan nama baru", "kembali", nil)
-end
-
-gantiNamaBerkasDialog = function(fullName, fileData, token, currentPath, repoObj)
-    local namaLama = fileData.name
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local lbl = TextView(service)
-    lbl.setText("Nama baru berkas:")
-    layout.addView(lbl)
-
-    local input = EditText(service)
-    input.setText(namaLama)
-    input.setSingleLine(true)
-    layout.addView(input)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Ganti nama: " .. namaLama)
-    b.setView(scroll)
-    b.setPositiveButton("simpan nama baru", DialogInterface.OnClickListener{
-        onClick = function()
-            local namaBaru = tostring(input.getText()):match("^%s*(.-)%s*$")
-            if namaBaru == "" or namaBaru == namaLama then
-                menuAksiFile(fullName, fileData, token, currentPath, repoObj)
-                return
-            end
-
-            local jalurBaru = (currentPath == "") and namaBaru or (currentPath .. "/" .. namaBaru)
-            local endpointAmbil = "https://api.github.com/repos/" .. fullName .. "/contents/" .. fileData.path
-
-            kirimPermintaanGitHub("GET", endpointAmbil, token, nil, function(okGet, resGet)
-                if not okGet then
-                    Toast.makeText(service, "Gagal mengambil berkas: " .. tostring(resGet), Toast.LENGTH_LONG).show()
-                    menuAksiFile(fullName, fileData, token, currentPath, repoObj)
-                    return
-                end
-
-                local objGet = JSONObject(resGet)
-                local shaLama = objGet.optString("sha", fileData.sha)
-                local contentBase64 = objGet.optString("content", ""):gsub("%s+", "")
-
-                local endpointBaru = "https://api.github.com/repos/" .. fullName .. "/contents/" .. jalurBaru
-                local payloadBaru = JSONObject()
-                payloadBaru.put("message", "Ganti nama " .. namaLama .. " menjadi " .. namaBaru)
-                payloadBaru.put("content", contentBase64)
-
-                kirimPermintaanGitHub("PUT", endpointBaru, token, payloadBaru.toString(), function(okPut, resPut)
-                    if not okPut then
-                        Toast.makeText(service, "Gagal membuat berkas baru: " .. tostring(resPut), Toast.LENGTH_LONG).show()
-                        menuAksiFile(fullName, fileData, token, currentPath, repoObj)
-                        return
-                    end
-
-                    local endpointHapus = "https://api.github.com/repos/" .. fullName .. "/contents/" .. fileData.path
-                    local payloadHapus = JSONObject()
-                    payloadHapus.put("message", "Hapus berkas lama setelah ganti nama")
-                    payloadHapus.put("sha", shaLama)
-
-                    kirimPermintaanGitHub("DELETE", endpointHapus, token, payloadHapus.toString(), function(okDel, resDel)
-                        if okDel then
-                            if service.speak then service.speak("Nama berkas berhasil diubah menjadi " .. namaBaru) end
-                            Toast.makeText(service, "Nama berkas diperbarui!", Toast.LENGTH_SHORT).show()
-                            bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj)
-                        else
-                            Toast.makeText(service, "Gagal menghapus berkas lama: " .. tostring(resDel), Toast.LENGTH_LONG).show()
-                            bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj)
-                        end
-                    end)
-                end)
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function()
-            menuAksiFile(fullName, fileData, token, currentPath, repoObj)
-        end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "simpan nama baru", "kembali", nil)
-end
-
-
-buatFolderRepoDialog = function(fullName, currentPath, token, repoObj)
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local lbl = TextView(service)
-    lbl.setText("Nama folder baru:")
-    layout.addView(lbl)
-
-    local input = EditText(service)
-    input.setHint("contoh: assets")
-    input.setSingleLine(true)
-    layout.addView(input)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Buat folder baru")
-    if currentPath ~= "" then
-        b.setMessage("Folder akan dibuat di dalam: " .. currentPath)
-    end
-    b.setView(scroll)
-    b.setPositiveButton("buat folder", DialogInterface.OnClickListener{
-        onClick = function()
-            local nama = tostring(input.getText()):match("^%s*(.-)%s*$")
-            if nama == "" then
-                Toast.makeText(service, "Nama folder tidak boleh kosong!", Toast.LENGTH_SHORT).show()
-                buatFolderRepoDialog(fullName, currentPath, token, repoObj)
-                return
-            end
-            if nama:find("[/\\\\]") then
-                Toast.makeText(service, "Nama folder tidak boleh mengandung / atau \\\\.", Toast.LENGTH_SHORT).show()
-                buatFolderRepoDialog(fullName, currentPath, token, repoObj)
-                return
-            end
-
-            local pathFolder = nama
-            if currentPath ~= "" then
-                pathFolder = currentPath:gsub("/+$", "") .. "/" .. nama
-            end
-            -- GitHub membuat folder dengan membuat berkas di dalamnya
-            local pathGitkeep = pathFolder .. "/.gitkeep"
-            local payload = JSONObject()
-            payload.put("message", "Buat folder " .. pathFolder)
-            payload.put("content", Base64.encodeToString(String("").getBytes("UTF-8"), Base64.NO_WRAP))
-
-            local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. pathGitkeep
-            kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(ok, res)
-                if ok then
-                    if service.speak then service.speak("Folder " .. nama .. " berhasil dibuat.") end
-                    Toast.makeText(service, "Folder dibuat: " .. pathFolder, Toast.LENGTH_SHORT).show()
-                    bukaDirektoriRepoDialog(fullName, pathFolder, token, repoObj)
-                else
-                    Toast.makeText(service, "Gagal membuat folder: " .. tostring(res), Toast.LENGTH_LONG).show()
-                    bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj)
-                end
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "buat folder", "kembali", nil)
-end
-
-tambahBerkasDiFolderDialog = function(fullName, currentPath, token, repoObj)
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local lblPath = TextView(service)
-    lblPath.setText("Nama berkas:")
-    layout.addView(lblPath)
-
-    local inputPath = EditText(service)
-    inputPath.setHint("contoh: catatan.txt")
-    inputPath.setSingleLine(true)
-    layout.addView(inputPath)
-
-    local lblKonten = TextView(service)
-    lblKonten.setText("Isi berkas:")
-    lblKonten.setPadding(0, 15, 0, 0)
-    layout.addView(lblKonten)
-
-    local inputKonten = EditText(service)
-    inputKonten.setHint("Ketik / tempel isi berkas...")
-    inputKonten.setMinLines(5)
-    layout.addView(inputKonten)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Tambah berkas")
-    if currentPath ~= "" then
-        b.setMessage("Berkas akan disimpan di: " .. currentPath)
-    end
-    b.setView(scroll)
-    b.setPositiveButton("simpan berkas", DialogInterface.OnClickListener{
-        onClick = function()
-            local namaBerkas = tostring(inputPath.getText()):match("^%s*(.-)%s*$")
-            local konten = tostring(inputKonten.getText())
-            if namaBerkas == "" then
-                Toast.makeText(service, "Nama berkas wajib diisi!", Toast.LENGTH_SHORT).show()
-                tambahBerkasDiFolderDialog(fullName, currentPath, token, repoObj)
-                return
-            end
-
-            local pathPenuh = namaBerkas
-            if currentPath ~= "" then
-                pathPenuh = currentPath:gsub("/+$", "") .. "/" .. namaBerkas
-            end
-
-            local kontenBase64 = Base64.encodeToString(String(konten).getBytes("UTF-8"), Base64.NO_WRAP)
-            local payload = JSONObject()
-            payload.put("message", "Tambah " .. pathPenuh)
-            payload.put("content", kontenBase64)
-
-            local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. pathPenuh:gsub(" ", "%%20")
-            kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(ok, res)
-                if ok then
-                    if service.speak then service.speak("Berkas berhasil ditambahkan.") end
-                    Toast.makeText(service, "Berkas ditambahkan: " .. pathPenuh, Toast.LENGTH_SHORT).show()
-                    bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj)
-                else
-                    Toast.makeText(service, "Gagal: " .. tostring(res), Toast.LENGTH_LONG).show()
-                    bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj)
-                end
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "simpan berkas", "kembali", nil)
-end
-
-bukaDirektoriRepoDialog = function(fullName, currentPath, token, repoObj)
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. currentPath
-    kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-        if not ok then
-            -- Folder kosong di GitHub mengembalikan 404
-            if tostring(res):find("404") then
-                res = "[]"
-                ok = true
-            else
-                Toast.makeText(service, "Gagal: " .. tostring(res), Toast.LENGTH_LONG).show()
-                return
-            end
-        end
-
-        local itemsArr = JSONArray(res)
-        local total = itemsArr.length()
-        local menuItems = {}
-        local dataItems = {}
-
-        -- Aksi tetap di setiap folder
-        table.insert(menuItems, "Buat folder baru")
-        table.insert(dataItems, {tipe = "aksi_buat_folder"})
-        table.insert(menuItems, "Tambah berkas (ketik teks)")
-        table.insert(dataItems, {tipe = "aksi_tambah_teks"})
-        table.insert(menuItems, "Unggah berkas dari HP")
-        table.insert(dataItems, {tipe = "aksi_unggah_hp"})
-
-        if currentPath ~= "" then
-            table.insert(menuItems, "Folder .. (kembali)")
-            table.insert(dataItems, {tipe = "kembali_folder"})
-        end
-
-        for i = 0, total - 1 do
-            local item = itemsArr.getJSONObject(i)
-            local tipe = item.optString("type", "")
-            local name = item.optString("name", "")
-            local awalan = (tipe == "dir") and "Folder " or "Berkas "
-
-            table.insert(menuItems, awalan .. name)
-            table.insert(dataItems, {
-                tipe = tipe,
-                name = name,
-                path = item.optString("path", ""),
-                sha = item.optString("sha", ""),
-                html_url = item.optString("html_url", ""),
-                download_url = item.optString("download_url", "")
-            })
-        end
-
-        local judul = (currentPath == "") and ("Berkas: " .. repoObj.optString("name", "")) or ("Folder: " .. currentPath)
-        local b = AlertDialog.Builder(service)
-        b.setTitle(judul)
-        b.setItems(menuItems, DialogInterface.OnClickListener{
-            onClick = function(dialog, which)
-                local data = dataItems[which + 1]
-                if data.tipe == "aksi_buat_folder" then
-                    buatFolderRepoDialog(fullName, currentPath, token, repoObj)
-                elseif data.tipe == "aksi_tambah_teks" then
-                    tambahBerkasDiFolderDialog(fullName, currentPath, token, repoObj)
-                elseif data.tipe == "aksi_unggah_hp" then
-                    unggahDariMemoriHPDialog(fullName, token, repoObj, Environment.getExternalStorageDirectory().getAbsolutePath(), currentPath)
-                elseif data.tipe == "kembali_folder" then
-                    local parentPath = currentPath:match("^(.*)/[^/]+$") or ""
-                    bukaDirektoriRepoDialog(fullName, parentPath, token, repoObj)
-                elseif data.tipe == "dir" then
-                    bukaDirektoriRepoDialog(fullName, data.path, token, repoObj)
-                else
-                    menuAksiFile(fullName, data, token, currentPath, repoObj)
-                end
-            end
-        })
-
-        b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-            onClick = function()
-                if currentPath == "" then
-                    kelolaRepoPilihanDialog(repoObj, token)
-                else
-                    local parentPath = currentPath:match("^(.*)/[^/]+$") or ""
-                    bukaDirektoriRepoDialog(fullName, parentPath, token, repoObj)
-                end
-            end
-        })
-
-        local diag = b.create()
-        diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        diag.show()
-        aturTombolHurufKecil(diag, nil, "kembali", nil)
-    end)
-end
-
-menuAksiFile = function(fullName, fileData, token, currentPath, repoObj)
-    local opsiFile = {
-        "1. Salin tautan raw (updater)",
-        "2. Edit isi berkas",
-        "3. Ganti nama berkas",
-        "4. Salin tautan web",
-        "5. Bagikan tautan raw",
-        "6. Hapus berkas"
-    }
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Berkas: " .. fileData.name)
-    b.setItems(opsiFile, DialogInterface.OnClickListener{
-        onClick = function(dialog, which)
-            if which == 0 then
-                salinKeClipboard("Tautan raw", fileData.download_url)
-            elseif which == 1 then
-                local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. fileData.path
-                kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-                    if ok then
-                        local obj = JSONObject(res)
-                        local sha = obj.optString("sha", "")
-                        local base64Content = obj.optString("content", ""):gsub("%s+", "")
-                        local bytes = Base64.decode(base64Content, Base64.DEFAULT)
-                        local isiTeks = String(bytes, "UTF-8")
-
-                        formEditIsiBerkas(fullName, fileData.path, sha, isiTeks, token, function()
-                            bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj)
-                        end, function()
-                            menuAksiFile(fullName, fileData, token, currentPath, repoObj)
-                        end)
-                    else
-                        Toast.makeText(service, "Gagal membaca: " .. tostring(res), Toast.LENGTH_LONG).show()
-                    end
-                end)
-            elseif which == 2 then
-                gantiNamaBerkasDialog(fullName, fileData, token, currentPath, repoObj)
-            elseif which == 3 then
-                salinKeClipboard("Tautan web", fileData.html_url)
-            elseif which == 4 then
-                bagikanTautan("Berkas raw: " .. fileData.name, fileData.download_url)
-            elseif which == 5 then
-                local konfirm = AlertDialog.Builder(service)
-                konfirm.setTitle("Hapus berkas?")
-                konfirm.setMessage("Hapus " .. fileData.name .. " dari repositori?")
-                konfirm.setPositiveButton("hapus berkas", DialogInterface.OnClickListener{
-                    onClick = function()
-                        local delEndpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. fileData.path
-                        local delPayload = JSONObject()
-                        delPayload.put("message", "Hapus " .. fileData.name)
-                        delPayload.put("sha", fileData.sha)
-
-                        kirimPermintaanGitHub("DELETE", delEndpoint, token, delPayload.toString(), function(sukses, hasilDel)
-                            if sukses then
-                                if service.speak then service.speak("Berkas dihapus.") end
-                                Toast.makeText(service, "Berkas dihapus!", Toast.LENGTH_SHORT).show()
-                                bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj)
-                            else
-                                Toast.makeText(service, "Gagal: " .. tostring(hasilDel), Toast.LENGTH_LONG).show()
-                            end
-                        end)
-                    end
-                })
-                konfirm.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                    onClick = function() menuAksiFile(fullName, fileData, token, currentPath, repoObj) end
-                })
-                local dKonfirm = konfirm.create()
-                dKonfirm.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                dKonfirm.show()
-                aturTombolHurufKecil(dKonfirm, "hapus berkas", "kembali", nil)
-            end
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() bukaDirektoriRepoDialog(fullName, currentPath, token, repoObj) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-formEditIsiBerkas = function(repo, path, sha, isiAwal, token, onSuccess, onBatal)
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local editor = EditText(service)
-    editor.setText(isiAwal)
-    editor.setMinLines(6)
-    layout.addView(editor)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local editBuilder = AlertDialog.Builder(service)
-    editBuilder.setTitle("Edit: " .. path)
-    editBuilder.setView(scroll)
-    editBuilder.setPositiveButton("simpan perubahan", DialogInterface.OnClickListener{
-        onClick = function()
-            local isiBaru = tostring(editor.getText())
-            local encoded = Base64.encodeToString(String(isiBaru).getBytes("UTF-8"), Base64.NO_WRAP)
-
-            local endpoint = "https://api.github.com/repos/" .. repo .. "/contents/" .. path
-            local putPayload = JSONObject()
-            putPayload.put("message", "Perbarui " .. path)
-            putPayload.put("content", encoded)
-            putPayload.put("sha", sha)
-
-            kirimPermintaanGitHub("PUT", endpoint, token, putPayload.toString(), function(sukses, hasil)
-                if sukses then
-                    if service.speak then service.speak("Perubahan disimpan.") end
-                    Toast.makeText(service, "Berkas diperbarui!", Toast.LENGTH_SHORT).show()
-                    if onSuccess then onSuccess() end
-                else
-                    Toast.makeText(service, "Gagal: " .. tostring(hasil), Toast.LENGTH_LONG).show()
-                end
-            end)
-        end
-    })
-    editBuilder.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function()
-            if onBatal then onBatal() else menuUtama() end
-        end
-    })
-
-    local editDialog = editBuilder.create()
-    editDialog.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    editDialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    editDialog.show()
-    aturTombolHurufKecil(editDialog, "simpan perubahan", "kembali", nil)
-end
-
-buatRepoDialog = function(token)
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local lblNama = TextView(service)
-    lblNama.setText("Nama repo:")
-    layout.addView(lblNama)
-
-    local inputNama = EditText(service)
-    inputNama.setHint("contoh: skrip-baru")
-    inputNama.setSingleLine(true)
-    layout.addView(inputNama)
-
-    local lblDesc = TextView(service)
-    lblDesc.setText("Deskripsi:")
-    lblDesc.setPadding(0, 15, 0, 0)
-    layout.addView(lblDesc)
-
-    local inputDesc = EditText(service)
-    inputDesc.setHint("Keterangan singkat")
-    inputDesc.setSingleLine(true)
-    layout.addView(inputDesc)
-
-    local chkPrivate = CheckBox(service)
-    chkPrivate.setText("Jadikan privat")
-    layout.addView(chkPrivate)
-
-    local chkReadme = CheckBox(service)
-    chkReadme.setText("Tambahkan README")
-    chkReadme.setChecked(false)
-    layout.addView(chkReadme)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Buat repositori baru")
-    b.setView(scroll)
-    b.setPositiveButton("buat repositori", DialogInterface.OnClickListener{
-        onClick = function()
-            local nama = tostring(inputNama.getText()):match("^%s*(.-)%s*$")
-            local desc = tostring(inputDesc.getText()):match("^%s*(.-)%s*$")
-            if nama == "" then
-                if service.speak then service.speak("Nama repo wajib diisi.") end
-                return
-            end
-
-            local isPrivat = chkPrivate.isChecked()
-            local payload = JSONObject()
-            payload.put("name", nama)
-            payload.put("description", desc)
-            payload.put("private", isPrivat)
-            local pakaiReadme = chkReadme.isChecked()
-            payload.put("auto_init", pakaiReadme)
-
-            kirimPermintaanGitHub("POST", "https://api.github.com/user/repos", token, payload.toString(), function(ok, res)
-                if ok then
-                    local obj = JSONObject(res)
-                    local fullName = obj.optString("full_name", "")
-                    local defaultBranch = obj.optString("default_branch", "main")
-                    local htmlUrl = obj.optString("html_url", "")
-
-                    mainHandler.postDelayed(Runnable{
-                        run = function()
-                            local function tampilHasil(suksesPages, infoPages)
-                                local pesanDialog = "Nama: " .. obj.optString("name", "") .. "\nTautan: " .. htmlUrl
-                                if suksesPages then
-                                    pesanDialog = pesanDialog .. "\n\nGitHub Pages aktif:\n" .. infoPages
-                                    if service.speak then service.speak("Repositori dan Pages berhasil diaktifkan.") end
-                                else
-                                    if service.speak then service.speak("Repositori berhasil dibuat.") end
-                                end
-
-                                local d = AlertDialog.Builder(service)
-                                d.setTitle("Repositori dibuat")
-                                d.setMessage(pesanDialog)
-                                d.setPositiveButton("salin tautan", DialogInterface.OnClickListener{
-                                    onClick = function() salinKeClipboard("Tautan repo", htmlUrl) end
-                                })
-                                d.setNeutralButton("bagikan", DialogInterface.OnClickListener{
-                                    onClick = function() bagikanTautan("Repo: " .. nama, htmlUrl) end
-                                })
-                                d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                                    onClick = function() menuUtama() end
-                                })
-                                local diag = d.create()
-                                diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                                diag.show()
-                                aturTombolHurufKecil(diag, "salin tautan", "kembali", "bagikan")
-                            end
-                            if pakaiReadme then
-                                aktifkanGitHubPagesOtomatis(fullName, defaultBranch, token, tampilHasil)
-                            else
-                                tampilHasil(false, "")
-                            end
-                        end
-                    }, 1500)
-                else
-                    if service.speak then service.speak("Gagal membuat repo.") end
-                    Toast.makeText(service, tostring(res), Toast.LENGTH_LONG).show()
-                end
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() menuUtama() end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "buat repositori", "kembali", nil)
-end
-
-tambahFileRepoDialog = function(token, repoOtomatis, repoObj)
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local lblRepo = TextView(service)
-    lblRepo.setText("Nama repo:")
-    layout.addView(lblRepo)
-
-    local inputRepo = EditText(service)
-    inputRepo.setHint("username/nama-repo")
-    inputRepo.setSingleLine(true)
-    if repoOtomatis then
-        inputRepo.setText(repoOtomatis)
-    end
-    layout.addView(inputRepo)
-
-    local lblPath = TextView(service)
-    lblPath.setText("Nama berkas:")
-    lblPath.setPadding(0, 15, 0, 0)
-    layout.addView(lblPath)
-
-    local inputPath = EditText(service)
-    inputPath.setHint("contoh: main.lua")
-    inputPath.setSingleLine(true)
-    layout.addView(inputPath)
-
-    local lblKonten = TextView(service)
-    lblKonten.setText("Isi berkas:")
-    lblKonten.setPadding(0, 15, 0, 0)
-    layout.addView(lblKonten)
-
-    local inputKonten = EditText(service)
-    inputKonten.setHint("Ketik / tempel isi berkas...")
-    inputKonten.setMinLines(5)
-    layout.addView(inputKonten)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Tambah berkas baru")
-    b.setView(scroll)
-    b.setPositiveButton("simpan berkas", DialogInterface.OnClickListener{
-        onClick = function()
-            local repo = tostring(inputRepo.getText()):match("^%s*(.-)%s*$")
-            local path = tostring(inputPath.getText()):match("^%s*(.-)%s*$")
-            local konten = tostring(inputKonten.getText())
-
-            if repo == "" or path == "" then
-                Toast.makeText(service, "Nama repo dan nama berkas wajib diisi!", Toast.LENGTH_SHORT).show()
-                return
-            end
-
-            local kontenBase64 = Base64.encodeToString(String(konten).getBytes("UTF-8"), Base64.NO_WRAP)
-            local payload = JSONObject()
-            payload.put("message", "Tambah " .. path)
-            payload.put("content", kontenBase64)
-
-            local endpoint = "https://api.github.com/repos/" .. repo .. "/contents/" .. path
-            kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(ok, res)
-                if ok then
-                    local obj = JSONObject(res)
-                    local contentObj = obj.optJSONObject("content")
-                    local fileUrl = contentObj and contentObj.optString("html_url", "") or ""
-                    local rawUrl = contentObj and contentObj.optString("download_url", "") or ""
-
-                    local d = AlertDialog.Builder(service)
-                    d.setTitle("Berkas ditambahkan")
-                    d.setMessage("Nama: " .. path .. "\n\nTautan raw:\n" .. rawUrl .. "\n\nTautan web:\n" .. fileUrl)
-                    d.setPositiveButton("salin tautan raw", DialogInterface.OnClickListener{
-                        onClick = function() salinKeClipboard("Tautan raw", rawUrl) end
-                    })
-                    d.setNeutralButton("bagikan", DialogInterface.OnClickListener{
-                        onClick = function() bagikanTautan("Berkas: " .. path, rawUrl) end
-                    })
-                    d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                        onClick = function()
-                            if repoObj then
-                                kelolaRepoPilihanDialog(repoObj, token)
-                            else
-                                menuUtama()
-                            end
-                        end
-                    })
-                    local diag = d.create()
-                    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                    diag.show()
-                    aturTombolHurufKecil(diag, "salin tautan raw", "kembali", "bagikan")
-                else
-                    Toast.makeText(service, "Gagal: " .. tostring(res), Toast.LENGTH_LONG).show()
-                end
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function()
-            if repoObj then
-                kelolaRepoPilihanDialog(repoObj, token)
-            else
-                menuUtama()
-            end
-        end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "simpan berkas", "kembali", nil)
-end
-
-PembuatAPK = {}
-PembuatAPK.baselineRun = {}
-local KEY_DAFTAR_APLIKASI = "key_daftar_aplikasi_apk_unik"
-local NAMA_ALUR_KERJA = "bangun-apk.yml"
-
-local TEMPLAT = {}
-
-TEMPLAT.settings = [==[
-import org.gradle.api.initialization.resolve.RepositoriesMode
-
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-rootProject.name = "@@NAMA_PROYEK@@"
-include ':app'
-]==]
-
-TEMPLAT.buildRoot = [==[
-plugins {
-    id 'com.android.application' version '8.7.0' apply false
-    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
-}
-]==]
-
-TEMPLAT.gradleProps = [==[
-org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
-android.useAndroidX=true
-android.enableJetifier=true
-android.nonTransitiveRClass=true
-]==]
-
-TEMPLAT.buildApp = [==[
-plugins {
-    id 'com.android.application'
-    @@KOTLIN_PLUGIN@@
-}
-
-android {
-    namespace '@@PAKET@@'
-    compileSdk @@COMPILE_SDK@@
-    defaultConfig {
-        applicationId '@@PAKET@@'
-        minSdk @@MIN_SDK@@
-        targetSdk @@TARGET_SDK@@
-        versionCode @@VERSION_CODE@@
-        versionName '@@VERSI@@'
-        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
-    }
-
-    buildTypes {
-        debug { debuggable true; applicationIdSuffix '.debug'; versionNameSuffix '-debug' }
-        release {
-            minifyEnabled @@MINIFY@@
-            shrinkResources @@SHRINK@@
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-        }
-        staging {
-            initWith debug
-            applicationIdSuffix '.staging'
-            versionNameSuffix '-staging'
-            matchingFallbacks = ['debug']
-        }
-    }
-
-    flavorDimensions 'versi'
-    productFlavors {
-        gratis { dimension 'versi'; applicationIdSuffix '.gratis'; versionNameSuffix '-gratis' }
-        pro { dimension 'versi'; applicationIdSuffix '.pro'; versionNameSuffix '-pro' }
-    }
-
-    signingConfigs {
-        release {
-            def ks = System.getenv('KEYSTORE_FILE')
-            def kp = System.getenv('KEYSTORE_PASSWORD')
-            def ka = System.getenv('KEY_ALIAS')
-            def pp = System.getenv('KEY_PASSWORD')
-            if (ks && kp && ka && pp) {
-                storeFile file(ks); storePassword kp; keyAlias ka; keyPassword pp
-            }
-        }
-    }
-    if (System.getenv('KEYSTORE_FILE') && System.getenv('KEYSTORE_PASSWORD') && System.getenv('KEY_ALIAS') && System.getenv('KEY_PASSWORD')) {
-        buildTypes.release.signingConfig signingConfigs.release
-    }
-
-    splits {
-        abi {
-            enable @@ABI_SPLIT@@
-            reset()
-            include @@ABI_INCLUDE@@
-            universalApk true
-        }
-    }
-
-    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
-    @@KOTLIN_OPTIONS@@
-    buildFeatures { viewBinding true; compose @@COMPOSE_ENABLED@@ }
-    @@COMPOSE_OPTIONS@@
-    lint {
-        abortOnError false
-        checkReleaseBuilds false
-    }
-    packaging.resources.excludes += ['/META-INF/{AL2.0,LGPL2.1}', '/META-INF/LICENSE*', '/META-INF/NOTICE*']
-}
-
-dependencies {
-    implementation 'androidx.core:core-ktx:1.13.1'
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'com.google.android.material:material:1.12.0'
-@@DEPENDENCIES@@
-    testImplementation 'junit:junit:4.13.2'
-    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
-    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
-}
-]==]
-
-TEMPLAT.proguard = [==[
--keepattributes *Annotation*
--keepclassmembers class * {
-    @android.webkit.JavascriptInterface <methods>;
-}
-]==]
-
-TEMPLAT.manifest = [==[
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-@@IZIN@@
-    <application
-        android:label="@string/app_name"
-        android:icon="@drawable/ikon_aplikasi"
-        android:allowBackup="@@BACKUP@@"
-        android:supportsRtl="true"
-        android:usesCleartextTraffic="@@CLEAR_TEXT@@"
-        android:theme="@@TEMA@@">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:screenOrientation="@@ORIENTASI@@"
-            android:configChanges="orientation|screenSize|keyboardHidden">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-@@COMPONENTS@@
-    </application>
-</manifest>
-]==]
-
-TEMPLAT.strings = [==[
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">@@NAMA_XML@@</string>
-    <color name="ikon_warna">@@WARNA_IKON@@</color>
-</resources>
-]==]
-
-TEMPLAT.icon = [==[
-<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <path
-        android:fillColor="@color/ikon_warna"
-        android:pathData="M0,0 L108,0 L108,108 L0,108 Z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M27,27 L81,27 L81,36 L36,36 L36,45 L72,45 L72,54 L36,54 L36,72 L81,72 L81,81 L27,81 Z" />
-</vector>
-]==]
-
-TEMPLAT.activity = [==[
-package @@PAKET@@;
-
-import android.app.Activity;
-import android.os.Bundle;
-import android.webkit.WebChromeClient;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
-import android.webkit.CookieManager;
-import android.view.Window;
-import android.graphics.Color;
-
-public class MainActivity extends Activity {
-    private WebView web;
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
-
-        web = new WebView(this);
-        web.setBackgroundColor(Color.TRANSPARENT);
-        setContentView(web);
-
-        WebSettings s = web.getSettings();
-        s.setJavaScriptEnabled(@@JS@@);
-        s.setDomStorageEnabled(@@SIMPAN@@);
-        s.setDatabaseEnabled(@@SIMPAN@@);
-        s.setAllowFileAccess(@@FILE_ACCESS@@);
-        s.setAllowContentAccess(@@CONTENT_ACCESS@@);
-        s.setBuiltInZoomControls(@@ZOOM@@);
-        s.setDisplayZoomControls(false);
-        s.setSupportZoom(@@ZOOM@@);
-        s.setMediaPlaybackRequiresUserGesture(@@MEDIA_GESTURE@@);
-
-        CookieManager.getInstance().setAcceptCookie(true);
-        web.setWebViewClient(new WebViewClient());
-        web.setWebChromeClient(new WebChromeClient());
-
-        if (savedInstanceState != null) {
-            web.restoreState(savedInstanceState);
-        } else {
-            web.loadUrl("@@ALAMAT@@");
-        }
-    }
-
-    @Override
-    protected void onSaveInstanceState(Bundle outState) {
-        if (web != null) web.saveState(outState);
-        super.onSaveInstanceState(outState);
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (@@KEMBALI@@ && web != null && web.canGoBack()) {
-            web.goBack();
-        } else {
-            super.onBackPressed();
-        }
-    }
-
-    @Override
-    protected void onDestroy() {
-        if (web != null) {
-            web.loadUrl("about:blank");
-            web.stopLoading();
-            web.destroy();
-        }
-        super.onDestroy();
-    }
-}
-]==]
-
-TEMPLAT.nativeJava = [==[
-package @@PAKET@@;
-
-import android.app.Activity;
-import android.os.Bundle;
-import android.graphics.Color;
-import android.view.Gravity;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-
-public class MainActivity extends Activity {
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER);
-        box.setPadding(32,32,32,32);
-        TextView title = new TextView(this);
-        title.setText("@@NAMA_XML@@");
-        title.setTextSize(26);
-        title.setTextColor(Color.BLACK);
-        box.addView(title);
-        TextView info = new TextView(this);
-        info.setText("Aplikasi Android native siap dikembangkan.");
-        box.addView(info);
-        setContentView(box);
-    }
-}
-]==]
-
-TEMPLAT.nativeKotlin = [==[
-package @@PAKET@@
-
-import android.app.Activity
-import android.os.Bundle
-import android.graphics.Color
-import android.view.Gravity
-import android.widget.LinearLayout
-import android.widget.TextView
-
-class MainActivity : Activity() {
-    override fun onCreate(state: Bundle?) {
-        super.onCreate(state)
-        val box = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER; setPadding(32,32,32,32) }
-        box.addView(TextView(this).apply { text="@@NAMA_XML@@"; textSize=26f; setTextColor(Color.BLACK) })
-        box.addView(TextView(this).apply { text="Aplikasi Android Kotlin siap dikembangkan." })
-        setContentView(box)
-    }
-}
-]==]
-
-TEMPLAT.composeKotlin = [==[
-package @@PAKET@@
-
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(state: Bundle?) { super.onCreate(state); setContent { LayarUtama() } }
-}
-
-@Composable fun LayarUtama() {
-    Column(Modifier.fillMaxSize(), horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement=Arrangement.Center) {
-        Text("@@NAMA_XML@@", style=MaterialTheme.typography.headlineMedium)
-        Text("Template Jetpack Compose siap dikembangkan.")
-    }
-}
-]==]
-
-TEMPLAT.serviceJava = [==[
-package @@PAKET@@;
-import android.app.Service;
-import android.content.Intent;
-import android.os.IBinder;
-public class NovanService extends Service {
-    @Override public int onStartCommand(Intent intent,int flags,int startId){ return START_STICKY; }
-    @Override public IBinder onBind(Intent intent){ return null; }
-}
-]==]
-
-TEMPLAT.receiverJava = [==[
-package @@PAKET@@;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-public class NovanReceiver extends BroadcastReceiver {
-    @Override public void onReceive(Context context, Intent intent) { }
-}
-]==]
-
-TEMPLAT.activityTest = [==[
-package @@PAKET@@;
-import androidx.test.ext.junit.runners.AndroidJUnit4;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import static org.junit.Assert.assertTrue;
-@RunWith(AndroidJUnit4.class)
-public class MainActivityTest { @Test public void aplikasiDapatDiuji(){ assertTrue(true); } }
-]==]
-
-TEMPLAT.html = [==[
-<!DOCTYPE html>
-<html lang="id">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#@@WARNA_IKON_HEX@@">
-<title>@@NAMA_XML@@</title>
-<style>
-body{font-family:sans-serif;padding:20px;line-height:1.6}
-h1{margin-top:0}
-.tombol{display:inline-block;padding:12px 16px;border-radius:8px;background:#@@WARNA_IKON_HEX@@;color:#fff;text-decoration:none}
-</style>
-</head>
-<body>
-<h1>Halo, dunia!</h1>
-<p>Ini halaman awal aplikasi <b>@@NAMA_XML@@</b>.</p>
-<p>Anda dapat mengubah halaman ini melalui menu <b>Kelola berkas proyek</b>.</p>
-<a class="tombol" href="https://developer.android.com/">Buka Android Developers</a>
-</body>
-</html>
-]==]
-
-TEMPLAT.readme = [==[
-# @@NAMA_XML@@
-
-Aplikasi Android yang dibuat melalui Pembuat APK.
-Proyek: @@PAKET@@
-Versi: @@VERSI@@
-
-APK dibangun otomatis oleh GitHub Actions.
-]==]
-
-TEMPLAT.workflowLengkap = [==[
-name: Bangun APK Android
-
-on:
-  workflow_dispatch:
-  push:
-    branches: [ main, master ]
-
-permissions:
-  contents: write
-
-jobs:
-  bangun:
-    name: Kompilasi APK
-    runs-on: ubuntu-latest
-    steps:
-      - name: Ambil kode sumber
-        uses: actions/checkout@v4
-
-      - name: Ekstrak ZIP proyek
-        run: |
-          shopt -s nullglob
-          zips=(*.zip)
-          if [ ${#zips[@]} -gt 0 ]; then
-            for z in "${zips[@]}"; do
-              echo "Mengekstrak $z ..."
-              unzip -o "$z"
-            done
+local function pesan(teks) Toast.makeText(service, teks, Toast.LENGTH_SHORT).show() end
+
+local ttsGlobal = nil
+local function speakText(teks)
+  if not teks or teks == "" then return end
+  local engine = getPref("tts_engine", "")
+  local pitch = (tonumber(getPref("tts_pitch", "100")) or 100) / 100
+  local rate = (tonumber(getPref("tts_rate", "100")) or 100) / 100
+  
+  local listener = luajava.createProxy("android.speech.tts.TextToSpeech$OnInitListener", {
+    onInit = function(status)
+      if status == TextToSpeech.SUCCESS then
+        if ttsGlobal then
+          ttsGlobal.setPitch(pitch)
+          ttsGlobal.setSpeechRate(rate)
+          ttsGlobal.setLanguage(Locale("id", "ID"))
+          if Build.VERSION.SDK_INT >= 21 then
+            ttsGlobal.speak(teks, TextToSpeech.QUEUE_FLUSH, nil, "tts_speak_id")
           else
-            echo "Tidak ada berkas ZIP di root repositori. Melanjutkan tanpa ekstraksi."
-          fi
-
-      - name: Pasang Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Siapkan Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: ''
-
-      - name: Pasang platform Android
-        run: |
-          sdkmanager --install "platform-tools" "platforms;android-34" "platforms;android-35" "platforms;android-36" "build-tools;34.0.0" "build-tools;35.0.0" "build-tools;36.0.0" || true
-          sdkmanager --install "platforms;android-36" "build-tools;35.0.0" || true
-          yes | sdkmanager --licenses >/dev/null || true
-
-      - name: Siapkan Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 9.3.1
-
-      - name: Kompilasi APK Android
-        run: |
-          GDIR=$(find . -maxdepth 4 \( -name "settings.gradle*" -o -name "build.gradle*" \) ! -path "*/build/*" | head -n 1)
-          [ -n "$GDIR" ] && cd "$(dirname "$GDIR")"
-          ROOT=$(pwd)
-          MODE="@@BUILD_MODE@@"
-          [ -z "$MODE" ] && MODE="debug"
-          echo "Mode pembangunan: $MODE"
-          # Cari keystore custom
-          KS=""
-          for c in "$ROOT/signing/release.jks" "$ROOT/signing/release.keystore" "signing/release.jks" "signing/release.keystore"; do
-            if [ -f "$c" ]; then KS="$c"; break; fi
-          done
-          if [ -n "$KS" ] && [ -f "$ROOT/signing/credentials.properties" ]; then
-            set -a
-            # shellcheck disable=SC1091
-            . "$ROOT/signing/credentials.properties" 2>/dev/null || true
-            set +a
-            export KEYSTORE_FILE="$KS"
-            export KEYSTORE_PASSWORD="${storePassword:-$KEYSTORE_PASSWORD}"
-            export KEY_PASSWORD="${keyPassword:-$KEY_PASSWORD}"
-            export KEY_ALIAS="${keyAlias:-$KEY_ALIAS}"
-            echo "Memakai tanda tangan custom: $KS (alias=${KEY_ALIAS:-tidak ada})"
-          else
-            echo "Tidak ada keystore custom; release memakai tanda tangan debug Gradle jika perlu."
-          fi
-          # Bangun sesuai pilihan user (Debug / Release kecil / keduanya)
-          if [ "$MODE" = "release" ] || [ "$MODE" = "both" ]; then
-            echo "Menjalankan assembleRelease (APK lebih ringan jika minify aktif)..."
-            gradle assembleRelease --no-daemon -x lint -x test || gradle assembleDebug --no-daemon -x lint -x test
-          fi
-          if [ "$MODE" = "debug" ] || [ "$MODE" = "both" ]; then
-            echo "Menjalankan assembleDebug..."
-            gradle assembleDebug --no-daemon -x lint -x test
-          fi
-
-      - name: Siapkan berkas APK
-        run: |
-          # Utamakan APK release (lebih kecil) jika ada
-          APK_PATH=$(find . -path "*/build/outputs/apk/*/release/*.apk" -name "*.apk" 2>/dev/null | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find . -path "*/build/outputs/apk/*" -name "*.apk" | head -n 1)
-          fi
-          test -n "$APK_PATH" || { echo "Berkas APK tidak ditemukan!"; exit 1; }
-          echo "APK dipilih: $APK_PATH ($(du -h "$APK_PATH" | cut -f1))"
-          cp "$APK_PATH" "@@NAMA_APK@@-v${{ github.run_number }}.apk"
-
-      - name: Simpan Artefak APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: APK-@@NAMA_APK@@-${{ github.run_number }}
-          path: "@@NAMA_APK@@-v${{ github.run_number }}.apk"
-
-      - name: Terbitkan ke GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_number }}
-          name: Versi v${{ github.run_number }}
-          generate_release_notes: false
-          files: "@@NAMA_APK@@-v${{ github.run_number }}.apk"
-]==]
-
-local function isiTemplat(templat, peta)
-    return templat:gsub("@@([%u_]+)@@", function(k)
-        local v = peta[k]
-        if v == nil then return "" end
-        return tostring(v)
-    end)
-end
-
-local function buatSlug(teks)
-    local s = tostring(teks):lower()
-    s = s:gsub("[^a-z0-9]+", "-")
-    s = s:gsub("^%-+", "")
-    s = s:gsub("%-+$", "")
-    return s
-end
-
-local function buatPaketOtomatis(slug)
-    local s = slug:gsub("%-", "")
-    if s == "" or s:match("^%d") then s = "app" .. s end
-    return "com.aplikasi." .. s
-end
-
-local function paketValid(paket)
-    if paket:find("^%.") or paket:find("%.$") or paket:find("%.%.") then return false end
-    local jumlah = 0
-    for seg in paket:gmatch("[^%.]+") do
-        if not seg:match("^[a-z][a-z0-9_]*$") then return false end
-        jumlah = jumlah + 1
-    end
-    return jumlah >= 2
-end
-
-local function escapeXml(s)
-    s = tostring(s)
-    s = s:gsub("&", "&amp;")
-    s = s:gsub("<", "&lt;")
-    s = s:gsub(">", "&gt;")
-    s = s:gsub('"', "&quot;")
-    return s
-end
-
-local function escapeJava(s)
-    s = tostring(s)
-    s = s:gsub("\\", "\\\\")
-    s = s:gsub('"', '\\"')
-    s = s:gsub("\n", "\\n")
-    s = s:gsub("\r", "\\r")
-    return s
-end
-
-local function tampilDialog(judul, pesan, pos, net, neg)
-    local d = AlertDialog.Builder(service)
-    d.setTitle(judul)
-    d.setMessage(pesan)
-    if pos then
-        d.setPositiveButton(pos[1], DialogInterface.OnClickListener{
-            onClick = function() if pos[2] then pos[2]() end end
-        })
-    end
-    if net then
-        d.setNeutralButton(net[1], DialogInterface.OnClickListener{
-            onClick = function() if net[2] then net[2]() end end
-        })
-    end
-    if neg then
-        d.setNegativeButton(neg[1], DialogInterface.OnClickListener{
-            onClick = function() if neg[2] then neg[2]() end end
-        })
-    end
-    local diag = d.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, pos and pos[1], neg and neg[1], net and net[1])
-end
-
-local function ambilDaftarAplikasi()
-    local hasil = {}
-    pcall(function()
-        local arr = JSONArray(prefs.getString(KEY_DAFTAR_APLIKASI, "[]"))
-        for i = 0, arr.length() - 1 do table.insert(hasil, arr.getString(i)) end
-    end)
-    return hasil
-end
-
-local function simpanDaftarAplikasi(daftar)
-    local arr = JSONArray()
-    for _, nama in ipairs(daftar) do arr.put(nama) end
-    prefs.edit().putString(KEY_DAFTAR_APLIKASI, arr.toString()).apply()
-end
-
-local function tambahKeDaftarAplikasi(fullName)
-    local daftar = ambilDaftarAplikasi()
-    for _, n in ipairs(daftar) do if n == fullName then return end end
-    table.insert(daftar, fullName)
-    simpanDaftarAplikasi(daftar)
-end
-
-local function terjemahStatus(status, kesimpulan)
-    if status == "queued" or status == "waiting" or status == "pending" then
-        return "Menunggu giliran"
-    elseif status == "in_progress" then
-        return "Sedang membangun"
-    elseif status == "completed" then
-        if kesimpulan == "success" then return "Berhasil"
-        elseif kesimpulan == "failure" then return "Gagal"
-        elseif kesimpulan == "cancelled" then return "Dibatalkan"
-        else return "Selesai (" .. tostring(kesimpulan) .. ")" end
-    end
-    return tostring(status)
-end
-
-local function pilihanTema(n)
-    if n == "Gelap" then return "@android:style/Theme.DeviceDefault.NoActionBar"
-    elseif n == "Terang" then return "@android:style/Theme.DeviceDefault.Light.NoActionBar"
-    else return "@android:style/Theme.DeviceDefault.NoActionBar" end
-end
-
-local function pilihanOrientasi(n)
-    if n == "Potret" then return "portrait"
-    elseif n == "Lanskap" then return "landscape"
-    else return "unspecified" end
-end
-
-local function buatIzin(o)
-    local p = {}
-    local function tambah(s) table.insert(p, '    <uses-permission android:name="' .. s .. '" />') end
-    if o.internet then tambah("android.permission.INTERNET") end
-    if o.statusJaringan then tambah("android.permission.ACCESS_NETWORK_STATE") end
-    if o.statusWifi then tambah("android.permission.ACCESS_WIFI_STATE") end
-    if o.penyimpanan then
-        table.insert(p, '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />')
-        table.insert(p, '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />')
-    end
-    if o.kelolaBerkas then tambah("android.permission.MANAGE_EXTERNAL_STORAGE") end
-    if o.pasangApk then tambah("android.permission.REQUEST_INSTALL_PACKAGES") end
-    if o.audioSetting then tambah("android.permission.MODIFY_AUDIO_SETTINGS") end
-    if o.kamera then tambah("android.permission.CAMERA") end
-    if o.mikrofon then tambah("android.permission.RECORD_AUDIO") end
-    if o.notifikasi then tambah("android.permission.POST_NOTIFICATIONS") end
-    if o.lokasi then
-        tambah("android.permission.ACCESS_COARSE_LOCATION")
-        tambah("android.permission.ACCESS_FINE_LOCATION")
-    end
-    if o.lokasiLatar then tambah("android.permission.ACCESS_BACKGROUND_LOCATION") end
-    if o.bluetooth then
-        tambah("android.permission.BLUETOOTH")
-        tambah("android.permission.BLUETOOTH_ADMIN")
-        tambah("android.permission.BLUETOOTH_CONNECT")
-        tambah("android.permission.BLUETOOTH_SCAN")
-    end
-    if o.bluetoothAdv then tambah("android.permission.BLUETOOTH_ADVERTISE") end
-    if o.wifiDekat then tambah("android.permission.NEARBY_WIFI_DEVICES") end
-    if o.nfc then tambah("android.permission.NFC") end
-    if o.audio then
-        if (tonumber(o.targetSdk) or 36) >= 33 then
-            tambah("android.permission.READ_MEDIA_AUDIO")
-        else
-            table.insert(p, '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />')
+            ttsGlobal.speak(teks, TextToSpeech.QUEUE_FLUSH, nil)
+          end
         end
+      end
     end
-    if o.foto then
-        if (tonumber(o.targetSdk) or 36) >= 33 then tambah("android.permission.READ_MEDIA_IMAGES") else table.insert(p, '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />') end
-    end
-    if o.video then
-        if (tonumber(o.targetSdk) or 36) >= 33 then tambah("android.permission.READ_MEDIA_VIDEO") else table.insert(p, '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />') end
-    end
-    if o.mediaVisual and (tonumber(o.targetSdk) or 36) >= 34 then tambah("android.permission.READ_MEDIA_VISUAL_USER_SELECTED") end
-    if o.kontak then tambah("android.permission.READ_CONTACTS"); tambah("android.permission.WRITE_CONTACTS") end
-    if o.kalender then tambah("android.permission.READ_CALENDAR"); tambah("android.permission.WRITE_CALENDAR") end
-    if o.telepon then tambah("android.permission.READ_PHONE_STATE") end
-    if o.panggilan then tambah("android.permission.CALL_PHONE") end
-    if o.sms then tambah("android.permission.READ_SMS"); tambah("android.permission.SEND_SMS") end
-    if o.sensorTubuh then tambah("android.permission.BODY_SENSORS") end
-    if o.aktivitas then tambah("android.permission.ACTIVITY_RECOGNITION") end
-    if o.alarm then tambah("android.permission.SCHEDULE_EXACT_ALARM") end
-    if o.boot then tambah("android.permission.RECEIVE_BOOT_COMPLETED") end
-    if o.getar then tambah("android.permission.VIBRATE") end
-    if o.wake then tambah("android.permission.WAKE_LOCK") end
-    if o.overlay then tambah("android.permission.SYSTEM_ALERT_WINDOW") end
-    if o.battery then tambah("android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS") end
-    if o.fgs or o.fgsMedia or o.fgsCamera or o.fgsMic or o.fgsLocation or o.fgsData or o.fgsDevice or o.fgsMediaProc or o.fgsProjection or o.fgsPhone then
-        tambah("android.permission.FOREGROUND_SERVICE")
-    end
-    if o.fgsMedia then tambah("android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK") end
-    if o.fgsCamera then tambah("android.permission.FOREGROUND_SERVICE_CAMERA") end
-    if o.fgsMic then tambah("android.permission.FOREGROUND_SERVICE_MICROPHONE") end
-    if o.fgsLocation then tambah("android.permission.FOREGROUND_SERVICE_LOCATION") end
-    if o.fgsData then tambah("android.permission.FOREGROUND_SERVICE_DATA_SYNC") end
-    if o.fgsDevice then tambah("android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE") end
-    if o.fgsMediaProc then tambah("android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING") end
-    if o.fgsProjection then tambah("android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION") end
-    if o.fgsPhone then tambah("android.permission.FOREGROUND_SERVICE_PHONE_CALL") end
-    return table.concat(p, "\n")
+  })
+
+  pcall(function()
+    if ttsGlobal then ttsGlobal.shutdown() end
+  end)
+
+  if engine ~= "" then
+    ttsGlobal = TextToSpeech(service, listener, engine)
+  else
+    ttsGlobal = TextToSpeech(service, listener)
+  end
 end
 
-local function nilaiWorkflowBoolean(v)
-    return v and "true" or "false"
+local function vibrate(ms)
+  if not getBool("use_vibration") then return end
+  local v = service.getSystemService(Context.VIBRATOR_SERVICE)
+  local dur = ms or tonumber(getPref("vibration_duration", "50"))
+  if v and v.hasVibrator() then v.vibrate(dur) end
 end
 
-local function daftarMatrix(jenis)
-    if jenis == "debug" then return "debug" end
-    if jenis == "release" then return "release" end
-    return "debug, release"
-end
-
-local function jenisProyekNormal(o)
-    local x = tostring(o.jenisProyek or "webview")
-    if x=="java" or x=="kotlin" or x=="compose" or x=="webview" or x=="html" then return x end
-    return "webview"
-end
-
-local function dependencyTambahan(o)
-    local d={}
-    local function add(x) table.insert(d,x) end
-    if o.camerax then add("implementation 'androidx.camera:camera-core:1.3.4'"); add("implementation 'androidx.camera:camera-camera2:1.3.4'"); add("implementation 'androidx.camera:camera-lifecycle:1.3.4'"); add("implementation 'androidx.camera:camera-view:1.3.4'") end
-    if o.mlkit then add("implementation 'com.google.mlkit:text-recognition:16.0.1'") end
-    if o.room then add("implementation 'androidx.room:room-runtime:2.6.1'"); add((o.kotlin and "kapt 'androidx.room:room-compiler:2.6.1'") or "annotationProcessor 'androidx.room:room-compiler:2.6.1'") end
-    if o.recyclerview then add("implementation 'androidx.recyclerview:recyclerview:1.3.2'") end
-    if o.constraint then add("implementation 'androidx.constraintlayout:constraintlayout:2.1.4'") end
-    if o.lifecycle then add("implementation 'androidx.lifecycle:lifecycle-runtime:2.8.4'") end
-    if o.navigation then add("implementation 'androidx.navigation:navigation-fragment:2.7.7'"); add("implementation 'androidx.navigation:navigation-ui:2.7.7'") end
-    if o.compose then
-        add("implementation platform('androidx.compose:compose-bom:2024.06.00')")
-        add("implementation 'androidx.activity:activity-compose:1.9.1'")
-        add("implementation 'androidx.compose.ui:ui'")
-        add("implementation 'androidx.compose.ui:ui-tooling-preview'")
-        add("implementation 'androidx.compose.material3:material3'")
-        add("debugImplementation 'androidx.compose.ui:ui-tooling'")
-    end
-    add("implementation fileTree(dir: 'libs', include: ['*.jar','*.aar'])")
-    return table.concat(d,"\n    ")
-end
-
-PembuatAPK.susunBerkas = function(o)
-    local proyek = jenisProyekNormal(o)
-    local alamat = (o.url ~= "") and o.url or "file:///android_asset/index.html"
-    local versiBersih = tostring(o.versi):gsub("[^%w%.%-]", "")
-    if versiBersih == "" then versiBersih = "1.0.0" end
-    local javaVersion = o.javaVersion or "17"
-    local gradleVersion = o.gradleVersion or "9.3.1"
-    local jenis = o.jenisBuild or "debug"
-    local matrixJenis = daftarMatrix(jenis)
-    local apk = o.hasApk ~= false
-    local aab = o.hasAab == true
-
-    local triggerPush = o.push and "  push:\n    branches: [ main, master ]" or ""
-    local triggerPr = o.pullRequest and "  pull_request:" or ""
-    local triggerSchedule = o.schedule and "  schedule:\n    - cron: '0 0 * * 0'" or ""
-
-    local peta = {
-        NAMA_PROYEK=o.slug, NAMA_APK=o.slug, NAMA_XML=escapeXml(o.nama), PAKET=o.paket,
-        VERSI=versiBersih, VERSION_CODE=o.versionCode, COMPILE_SDK=o.compileSdk,
-        MIN_SDK=o.minSdk, TARGET_SDK=o.targetSdk, ALAMAT=escapeJava(alamat),
-        JS=nilaiWorkflowBoolean(o.js), SIMPAN=nilaiWorkflowBoolean(o.simpan),
-        FILE_ACCESS=nilaiWorkflowBoolean(o.fileAccess), CONTENT_ACCESS=nilaiWorkflowBoolean(o.contentAccess),
-        ZOOM=nilaiWorkflowBoolean(o.zoom), MEDIA_GESTURE=nilaiWorkflowBoolean(not o.mediaGesture),
-        KEMBALI=nilaiWorkflowBoolean(o.kembali), IZIN=buatIzin(o), BACKUP=nilaiWorkflowBoolean(o.backup),
-        CLEAR_TEXT=nilaiWorkflowBoolean(o.clearText), TEMA=pilihanTema(o.tema), ORIENTASI=pilihanOrientasi(o.orientasi),
-        WARNA_IKON=o.warnaIkon, WARNA_IKON_HEX=o.warnaIkon:gsub("#",""),
-        COMPONENTS=(o.service and '        <service android:name=".NovanService" android:exported="false" />\n' or '') .. (o.receiver and '        <receiver android:name=".NovanReceiver" android:exported="false" />' or ''),
-        JAVA_VERSION=javaVersion, GRADLE_VERSION=gradleVersion, COMPILE_SDK=o.compileSdk,
-        KOTLIN_PLUGIN=(proyek=="kotlin" or proyek=="compose") and ((o.room and "id 'org.jetbrains.kotlin.android'\n     id 'org.jetbrains.kotlin.kapt'") or "id 'org.jetbrains.kotlin.android'") or "",
-        KOTLIN_OPTIONS=(proyek=="kotlin" or proyek=="compose") and "kotlinOptions { jvmTarget = '17' }" or "",
-        COMPOSE_ENABLED=nilaiWorkflowBoolean(proyek=="compose"),
-        COMPOSE_OPTIONS=(proyek=="compose") and "composeOptions { kotlinCompilerExtensionVersion '1.5.14' }" or "",
-        DEPENDENCIES=dependencyTambahan({camerax=o.camerax,mlkit=o.mlkit,room=o.room,kotlin=(proyek=="kotlin" or proyek=="compose"),recyclerview=o.recyclerview,constraint=o.constraint,lifecycle=o.lifecycle,navigation=o.navigation,compose=(proyek=="compose")}),
-        TRIGGER_PUSH=triggerPush, TRIGGER_PR=triggerPr, TRIGGER_SCHEDULE=triggerSchedule,
-        VALIDATE_WRAPPER=nilaiWorkflowBoolean(o.validateWrapper), RUN_LINT=nilaiWorkflowBoolean(o.runLint),
-        RUN_UNIT_TEST=nilaiWorkflowBoolean(o.runUnitTest), RUN_INSTRUMENTATION=nilaiWorkflowBoolean(o.runInstrumentation),
-        HAS_APK=nilaiWorkflowBoolean(apk), HAS_AAB=nilaiWorkflowBoolean(aab), SIGNING=nilaiWorkflowBoolean(o.signing),
-        MINIFY=nilaiWorkflowBoolean(o.minify), SHRINK=nilaiWorkflowBoolean(o.shrink),
-        BUILD_MODE=(o.jenisBuild == "release" and "release" or o.jenisBuild == "both" and "both" or "debug"),
-        CACHE_DISABLED=nilaiWorkflowBoolean(not o.cache),
-        MATRIX_JENIS=matrixJenis, FAIL_FAST=nilaiWorkflowBoolean(o.failFast),
-        ABI_SPLIT=nilaiWorkflowBoolean(o.abi and o.abi ~= "universal"),
-        ABI_INCLUDE=(o.abi == "arm64" and "'arm64-v8a'" or o.abi == "armv7" and "'armeabi-v7a'" or o.abi == "arm64armv7" and "'arm64-v8a', 'armeabi-v7a'" or "'arm64-v8a', 'armeabi-v7a'"),
-        RETENTION=o.retention or 30, PUBLISH_RELEASE=nilaiWorkflowBoolean(o.publish),
-        MAKE_RELEASE=nilaiWorkflowBoolean(o.makeRelease), NAMA_RELEASE=escapeJava(o.nama),
-        ATTEST=nilaiWorkflowBoolean(o.attest), EMULATOR_API=o.emulatorApi or 30,
-    }
-
-    local berkas={
-        {path="settings.gradle",isi=isiTemplat(TEMPLAT.settings,peta)},
-        {path="build.gradle",isi=isiTemplat(TEMPLAT.buildRoot,peta)},
-        {path="gradle.properties",isi=isiTemplat(TEMPLAT.gradleProps,peta)},
-        {path="app/build.gradle",isi=isiTemplat(TEMPLAT.buildApp,peta)},
-        {path="app/proguard-rules.pro",isi=TEMPLAT.proguard},
-        {path="app/src/main/AndroidManifest.xml",isi=isiTemplat(TEMPLAT.manifest,peta)},
-        {path="app/src/main/res/values/strings.xml",isi=isiTemplat(TEMPLAT.strings,peta)},
-        {path="app/src/main/res/drawable/ikon_aplikasi.xml",isi=isiTemplat(TEMPLAT.icon,peta)},
-        {path="app/src/main/java/"..o.paket:gsub("%.","/").."/MainActivity.java",isi=isiTemplat(((proyek=="webview" or proyek=="html") and TEMPLAT.activity or TEMPLAT.nativeJava),peta)},
-        {path=".github/workflows/"..NAMA_ALUR_KERJA,isi=isiTemplat(TEMPLAT.workflowLengkap,peta)},
-    }
-    if o.readme then
-        berkas[#berkas+1]={path="README.md",isi=isiTemplat(TEMPLAT.readme,peta)}
-    end
-    if proyek=="kotlin" or proyek=="compose" then
-        table.remove(berkas,9)
-        berkas[#berkas+1]={path="app/src/main/java/"..o.paket:gsub("%.","/").."/MainActivity.kt",isi=isiTemplat(proyek=="compose" and TEMPLAT.composeKotlin or TEMPLAT.nativeKotlin,peta)}
-    end
-    if o.service then berkas[#berkas+1]={path="app/src/main/java/"..o.paket:gsub("%.","/").."/NovanService.java",isi=isiTemplat(TEMPLAT.serviceJava,peta)} end
-    if o.receiver then berkas[#berkas+1]={path="app/src/main/java/"..o.paket:gsub("%.","/").."/NovanReceiver.java",isi=isiTemplat(TEMPLAT.receiverJava,peta)} end
-    if o.instrumentationTest then berkas[#berkas+1]={path="app/src/androidTest/java/"..o.paket:gsub("%.","/").."/MainActivityTest.java",isi=isiTemplat(TEMPLAT.activityTest,peta)} end
-    berkas[#berkas+1]={path="app/libs/README.txt",isi="Letakkan file .jar atau .aar lokal di folder libs.\nLibrary native .so dapat ditempatkan sesuai ABI di src/main/jniLibs/."}
-    if (proyek=="webview" or proyek=="html") and o.url == "" then
-        local html=o.html
-        if html=="" then html=isiTemplat(TEMPLAT.html,peta) end
-        table.insert(berkas,{path="app/src/main/assets/index.html",isi=html})
-    end
-    return berkas
-end
-
-function PembuatAPK.unggahBerurutan(fullName, token, berkas, idx, progress, onSelesai)
-    if idx > #berkas then onSelesai(true, ""); return end
-    local b = berkas[idx]
-    pcall(function()
-        progress.setMessage("Mengunggah berkas " .. idx .. " dari " .. #berkas .. ":\n" .. b.path)
-    end)
-    local payload = JSONObject()
-    payload.put("message", "Tambah " .. b.path)
-    payload.put("content", Base64.encodeToString(String(b.isi).getBytes("UTF-8"), Base64.NO_WRAP))
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. b.path
-    kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(ok, res)
-        if ok then
-            PembuatAPK.unggahBerurutan(fullName, token, berkas, idx + 1, progress, onSelesai)
-        else
-            onSelesai(false, "Gagal mengunggah " .. b.path .. ":\n" .. tostring(res))
-        end
-    end, true)
-end
-
-function PembuatAPK.buatProyek(token, o)
-    local berkas = PembuatAPK.susunBerkas(o)
-    local progress = ProgressDialog(service)
-    progress.setTitle("Membuat proyek aplikasi")
-    progress.setMessage("Membuat repositori proyek...")
-    progress.setCancelable(false)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-
-    local body = JSONObject()
-    body.put("name", o.slug)
-    body.put("description", "Proyek aplikasi " .. o.nama .. " dibuat dari Pembuat APK")
-    body.put("private", o.privat)
-    body.put("auto_init", false)
-
-    kirimPermintaanGitHub("POST", "https://api.github.com/user/repos", token, body.toString(), function(ok, res)
-        if not ok then
-            pcall(function() progress.dismiss() end)
-            tampilDialog("Gagal membuat proyek", tostring(res),
-                {"coba lagi", function() PembuatAPK.formAplikasiBaru(token) end}, nil,
-                {"kembali", function() PembuatAPK.menu(token) end})
-            return
-        end
-
-        local repo = JSONObject(res)
-        local fullName = repo.optString("full_name", "")
-        local htmlUrl = repo.optString("html_url", "")
-        pcall(function() progress.setMessage("Repositori dibuat. Mengunggah " .. #berkas .. " berkas konfigurasi...") end)
-
-        PembuatAPK.unggahBerurutan(fullName, token, berkas, 1, progress, function(sukses, pesanGagal)
-            pcall(function() progress.dismiss() end)
-            if not sukses then
-                local pesan = pesanGagal
-                if pesan:lower():find("workflow") then
-                    pesan = pesan .. "\n\nToken GitHub perlu izin workflow."
-                end
-                tampilDialog("Pembuatan terhenti", pesan .. "\n\nRepositori sudah dibuat di:\n" .. htmlUrl,
-                    {"buka di GitHub", function() bukaBrowser(htmlUrl) end}, nil,
-                    {"kembali", function() PembuatAPK.menu(token) end})
-                return
-            end
-
-            tambahKeDaftarAplikasi(fullName)
-            if service.speak then service.speak("Proyek aplikasi berhasil dibuat.") end
-            local info = "Proyek aplikasi berhasil dibuat.\n\nRepositori: " .. fullName
-            if o.otomatis then
-                info = info .. "\n\nPembangunan otomatis akan dimulai saat perubahan masuk ke cabang utama."
-            else
-                info = info .. "\n\nPilih Mulai pembangunan APK jika ingin membangun sekarang."
-            end
-            tampilDialog("Proyek berhasil dibuat", info,
-                {"mulai pembangunan", function() PembuatAPK.bangunUlang(fullName, token) end},
-                {"cek status", function() PembuatAPK.cekStatus(fullName, token) end},
-                {"kembali", function() PembuatAPK.menu(token) end})
-        end)
-    end)
-end
-
-PembuatAPK.formAplikasiBaru = function(token)
-    local root=LinearLayout(service); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(40,20,40,10)
-    local function lab(t)
-        local v=TextView(service); v.setText(t); v.setPadding(0,14,0,4); root.addView(v)
-    end
-    local function inp(h,def,multi)
-        local e=EditText(service); e.setHint(h); if def then e.setText(def) end; if not multi then e.setSingleLine(true) end; root.addView(e); return e
-    end
-    local function chk(t,v)
-        local c=CheckBox(service); c.setText(t); c.setChecked(v); root.addView(c); return c
-    end
-    local function spin(t,items,idx)
-        lab(t); local s=Spinner(service); local a=ArrayAdapter(service,android.R.layout.simple_spinner_item,items); a.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item); s.setAdapter(a); s.setSelection(idx or 0); root.addView(s); return s
-    end
-    local function sv(s) return tostring(s.getSelectedItem()) end
-
-    lab("IDENTITAS APLIKASI")
-    local nama=inp("Nama aplikasi, contoh: Toko Saya")
-    local paket=inp("Nama paket, contoh: com.toko.saya")
-    local versi=inp("Versi aplikasi, misalnya 1.0.0")
-    local vc=inp("Nomor versi internal, misalnya 1")
-
-    lab("SUMBER APLIKASI")
-    local url=inp("Alamat situs https://...")
-    local html=inp("HTML halaman awal jika alamat situs kosong",nil,true); html.setMinLines(4)
-
-    lab("JENIS PROYEK")
-    local proyek=spin("Jenis aplikasi",{"Situs web (WebView)","Halaman HTML","Aplikasi Android (Java)","Aplikasi Android (Kotlin)","Aplikasi Android modern (Compose)"},0)
-    lab("FITUR TAMBAHAN")
-    local chkService=chk("Jalankan aplikasi di latar belakang",false); local receiver=chk("Menerima perintah dari sistem",false)
-    local cameraX=chk("Kamera modern (CameraX)",false); local mlkit=chk("Membaca teks dari gambar (ML Kit)",false)
-    local room=chk("Database lokal (Room)",false); local recycler=chk("Daftar yang ringan (RecyclerView)",false)
-    local constraint=chk("Tata letak fleksibel (ConstraintLayout)",false); local lifecycle=chk("Kelola siklus aplikasi",false)
-    local navigation=chk("Navigasi antarhalaman",false)
-
-    lab("PENGATURAN ANDROID")
-    local minSdk=inp("API minimum, misalnya 24"); local targetSdk=inp("API target, misalnya 36 (Android 16)"); local compileSdk=inp("API kompilasi, misalnya 36 (Android 16)")
-    local tema=spin("Mode tampilan",{"Gelap","Terang"},1)
-    local orientasi=spin("Posisi layar",{"Otomatis","Potret","Lanskap"},0)
-    local warna=inp("Warna ikon, misalnya #1976D2")
-
-    lab("PENGATURAN SITUS WEB")
-    local js=chk("Aktifkan JavaScript",true); local simpan=chk("Simpan cookie, data situs, dan login",true)
-    local fa=chk("Izinkan akses berkas",true); local ca=chk("Izinkan akses konten",true)
-    local zoom=chk("Aktifkan pembesaran",false); local media=chk("Media boleh diputar tanpa sentuhan",false); local back=chk("Tombol kembali membuka halaman sebelumnya",true)
-
-    lab("IZIN APLIKASI")
-    local internet=chk("Akses internet",true)
-    local statusJaringan=chk("Status jaringan (Network State)",true)
-    local statusWifi=chk("Status Wi-Fi (Wi-Fi State)",false)
-    local penyimpanan=chk("Penyimpanan / Unduh berkas (Storage)",false)
-    local kelolaBerkas=chk("Kelola semua berkas (Manage Storage)",false)
-    local pasangApk=chk("Pasang paket APK (Request Install)",false)
-    local audioSetting=chk("Pengaturan audio perangkat",false)
-    local audio=chk("Membaca musik dan audio",false); local foto=chk("Membaca foto",false); local video=chk("Membaca video",false); local mediaVisual=chk("Memilih foto atau video",false)
-    local kamera=chk("Kamera",false); local mikro=chk("Mikrofon dan rekam suara",false); local notif=chk("Notifikasi",false); local lokasi=chk("Lokasi",false); local lokasiLatar=chk("Lokasi saat aplikasi di latar",false)
-    local bluetooth=chk("Bluetooth",false); local bluetoothAdv=chk("Bluetooth: mengiklankan perangkat",false); local wifiDekat=chk("Perangkat Wi-Fi di sekitar",false); local nfc=chk("NFC",false); local usb=chk("Perangkat USB",false)
-    local kontak=chk("Kontak",false); local kalender=chk("Kalender",false); local telepon=chk("Informasi telepon",false); local panggilan=chk("Melakukan panggilan telepon",false); local sms=chk("SMS",false); local sensorTubuh=chk("Sensor tubuh",false); local aktivitas=chk("Aktivitas fisik",false)
-    local alarm=chk("Alarm tepat waktu",false); local boot=chk("Jalankan setelah HP menyala",false); local getar=chk("Getar",false); local wake=chk("Menjaga aplikasi tetap aktif",false); local overlay=chk("Tampil di atas aplikasi lain",false); local battery=chk("Abaikan penghemat baterai",false)
-    local fgs=chk("Layanan latar depan",false); local fgsMedia=chk("Layanan latar depan: memutar musik",false); local fgsCamera=chk("Layanan latar depan: kamera",false); local fgsMic=chk("Layanan latar depan: mikrofon",false); local fgsLocation=chk("Layanan latar depan: lokasi",false); local fgsData=chk("Layanan latar depan: sinkronisasi data",false); local fgsDevice=chk("Layanan latar depan: perangkat terhubung",false); local fgsMediaProc=chk("Layanan latar depan: pemrosesan media",false); local fgsProjection=chk("Layanan latar depan: tangkap layar",false); local fgsPhone=chk("Layanan latar depan: telepon",false)
-
-    lab("HASIL PEMBUATAN")
-    local jenis=spin("Jenis pembuatan (geser untuk pilih)",{"Uji coba Debug (lebih besar, cepat)","Release kecil (minify, lebih ringan)","Uji coba + Release kecil"},0)
-    lab("Debug = cepat diuji. Release kecil = APK lebih ringan (R8 minify).")
-    local hasil=spin("Berkas hasil",{"APK untuk dipasang di HP","AAB untuk Play Store","APK + AAB"},0)
-    local abi=spin("Jenis prosesor HP",{"Semua / Universal","ARM64-v8a","ARMv7","ARM64 + ARMv7"},0)
-    local minify=chk("Optimasi R8/Minify (otomatis aktif jika Release kecil)",true)
-    local shrink=chk("Hapus resource tidak terpakai (disarankan Release kecil)",true)
-
-    lab("PEMERIKSAAN DAN UJI APLIKASI")
-    local lint=chk("Periksa kesalahan kode",true); local unit=chk("Jalankan tes kode",false); local instr=chk("Tes di HP Android virtual",false)
-    local wrapper=chk("Periksa alat Gradle",false); local failfast=chk("Hentikan semua pembangunan jika ada yang gagal",true)
-    local emulator=spin("Versi Android emulator",{"30","31","32","33","34","35"},0)
-
-    lab("PEMBANGUNAN OTOMATIS GITHUB")
-    local push=chk("Bangun otomatis saat kode dikirim ke main/master",false); local pr=chk("Bangun otomatis saat ada Pull Request",false); local schedule=chk("Bangun otomatis setiap minggu",false)
-    local cache=chk("Percepat pembangunan dengan cache",true); local publish=chk("Siapkan hasil untuk dipublikasikan",true); local release=chk("Buat rilis GitHub otomatis",true)
-    local attest=chk("Buat bukti asal hasil pembangunan",false)
-    local retention=inp("Lama simpan hasil build dalam hari, misalnya 30")
-
-    lab("TANDA TANGAN VERSI RILIS")
-    local signing=chk("Tanda tangani versi rilis dengan GitHub Secrets",false)
-    local readme=chk("Buat petunjuk aplikasi (README)",true)
-    lab("Jika signing diaktifkan, buat Secrets berikut di GitHub: KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD. Password tidak ditulis ke dalam source code.")
-
-    local scroll=ScrollView(service.getApplicationContext()); scroll.setFillViewport(true); scroll.addView(root)
-    local b=AlertDialog.Builder(service); b.setTitle("Buat APK Android lengkap"); b.setView(scroll)
-    b.setPositiveButton("buat proyek",DialogInterface.OnClickListener{onClick=function()
-        local function val(e) return tostring(e.getText()):match("^%s*(.-)%s*$") end
-        local function laporErrorForm(pesan)
-            if service.speak then service.speak("Periksa isian: " .. pesan) end
-            local bErr = AlertDialog.Builder(service)
-            bErr.setTitle("Isian Belum Tepat")
-            bErr.setMessage(pesan)
-            bErr.setPositiveButton("perbaiki", nil)
-            local dErr = bErr.create()
-            dErr.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-            dErr.show()
-            aturTombolHurufKecil(dErr, "perbaiki", nil, nil)
-        end
-
-        local n = val(nama)
-        if n == "" then
-            laporErrorForm("Nama aplikasi wajib diisi.")
-            return
-        end
-
-        local slug = buatSlug(n)
-        if slug == "" then
-            laporErrorForm("Nama aplikasi harus mengandung huruf atau angka.")
-            return
-        end
-
-        local pk = val(paket)
-        if pk == "" then
-            laporErrorForm("Nama paket wajib diisi sendiri (contoh: com.toko.novel). Tidak boleh dikosongkan.")
-            return
-        end
-        -- Normalisasi ringan: huruf kecil, spasi jadi titik
-        pk = pk:lower():gsub("%s+", ".")
-        pk = pk:gsub("[^a-z0-9%._]", "")
-        pk = pk:gsub("%.%.+", "."):gsub("^%.", ""):gsub("%.$", "")
-        if not paketValid(pk) then
-            laporErrorForm("Nama paket tidak valid: " .. pk .. "\nGunakan huruf kecil dan titik, minimal 2 bagian, contoh: com.toko.novel\nJangan pakai spasi atau nama bebas seperti judul buku.")
-            return
-        end
-
-        local mi = tonumber(val(minSdk)) or 24
-        local ta = tonumber(val(targetSdk)) or 36
-        local co = tonumber(val(compileSdk)) or 36
-        local vcode = tonumber(val(vc)) or 1
-        local vv = val(versi)
-        if vv == "" then vv = "1.0.0" end
-
-        if mi < 21 or mi > 36 then
-            laporErrorForm("Versi Android minimum (API) harus antara 21 sampai 36. Android 16 = API 36.")
-            return
-        end
-        if ta < mi or ta > 36 then
-            laporErrorForm("Versi Android target (API) harus minimal sama dengan minimum dan maksimal 36 (Android 16).")
-            return
-        end
-        if co < ta or co > 36 then
-            laporErrorForm("Versi Android kompilasi (API) harus minimal sama dengan target dan maksimal 36 (Android 16).")
-            return
-        end
-        if vcode < 1 then
-            laporErrorForm("Nomor versi internal harus bilangan bulat minimal 1.")
-            return
-        end
-
-        local w = val(warna)
-        if w == "" then w = "#1976D2" end
-        if not w:match("^#%x%x%x%x%x%x$") then
-            laporErrorForm("Warna ikon harus format tanda pagar diikuti 6 digit heksadesimal, contoh: #1976D2")
-            return
-        end
-
-        local lamaSimpan = tonumber(val(retention)) or 30
-        if lamaSimpan < 1 or lamaSimpan > 90 then
-            laporErrorForm("Lama simpan hasil build harus antara 1 sampai 90 hari.")
-            return
-        end
-        local pj=sv(proyek); local jenisProyek=(pj=="Aplikasi Android (Java)" and "java" or pj=="Aplikasi Android (Kotlin)" and "kotlin" or pj=="Aplikasi Android modern (Compose)" and "compose" or pj=="Halaman HTML" and "html" or "webview")
-        local j=sv(jenis)
-        local jenisBuild = "debug"
-        if j:find("Uji coba %+ Release") or j:find("Uji coba + Release") then
-            jenisBuild = "both"
-        elseif j:find("Release kecil") or j:find("Release") then
-            jenisBuild = "release"
-        end
-        -- Release kecil: paksa minify + shrink agar APK lebih ringan
-        local pakaiMinify = minify.isChecked()
-        local pakaiShrink = shrink.isChecked()
-        if jenisBuild == "release" or jenisBuild == "both" then
-            pakaiMinify = true
-            pakaiShrink = true
-        end
-        local h=sv(hasil); local hasApk=h=="APK" or h=="APK + AAB"; local hasAab=h=="AAB" or h=="APK + AAB"
-        local apiEmulator=tonumber(sv(emulator)) or 30
-        if instr.isChecked() and apiEmulator < mi then Toast.makeText(service,"Versi Android emulator harus sama atau lebih tinggi dari Versi Android minimum.",Toast.LENGTH_LONG).show(); return end
-        PembuatAPK.buatProyek(token,{nama=n,slug=slug,paket=pk,versi=vv,versionCode=vcode,minSdk=mi,targetSdk=ta,compileSdk=co,url=val(url),html=tostring(html.getText()),jenisProyek=jenisProyek,service=chkService.isChecked(),receiver=receiver.isChecked(),camerax=cameraX.isChecked(),mlkit=mlkit.isChecked(),room=room.isChecked(),recyclerview=recycler.isChecked(),constraint=constraint.isChecked(),lifecycle=lifecycle.isChecked(),navigation=navigation.isChecked(),instrumentationTest=instr.isChecked(),
-            js=js.isChecked(),simpan=simpan.isChecked(),fileAccess=fa.isChecked(),contentAccess=ca.isChecked(),zoom=zoom.isChecked(),mediaGesture=media.isChecked(),kembali=back.isChecked(),
-            internet=internet.isChecked(),statusJaringan=statusJaringan.isChecked(),statusWifi=statusWifi.isChecked(),penyimpanan=penyimpanan.isChecked(),kelolaBerkas=kelolaBerkas.isChecked(),pasangApk=pasangApk.isChecked(),audioSetting=audioSetting.isChecked(),audio=audio.isChecked(),foto=foto.isChecked(),video=video.isChecked(),mediaVisual=mediaVisual.isChecked(),kamera=kamera.isChecked(),mikrofon=mikro.isChecked(),notifikasi=notif.isChecked(),lokasi=lokasi.isChecked(),lokasiLatar=lokasiLatar.isChecked(),bluetooth=bluetooth.isChecked(),bluetoothAdv=bluetoothAdv.isChecked(),wifiDekat=wifiDekat.isChecked(),nfc=nfc.isChecked(),usb=usb.isChecked(),kontak=kontak.isChecked(),kalender=kalender.isChecked(),telepon=telepon.isChecked(),panggilan=panggilan.isChecked(),sms=sms.isChecked(),sensorTubuh=sensorTubuh.isChecked(),aktivitas=aktivitas.isChecked(),alarm=alarm.isChecked(),boot=boot.isChecked(),getar=getar.isChecked(),wake=wake.isChecked(),overlay=overlay.isChecked(),battery=battery.isChecked(),fgs=fgs.isChecked(),fgsMedia=fgsMedia.isChecked(),fgsCamera=fgsCamera.isChecked(),fgsMic=fgsMic.isChecked(),fgsLocation=fgsLocation.isChecked(),fgsData=fgsData.isChecked(),fgsDevice=fgsDevice.isChecked(),fgsMediaProc=fgsMediaProc.isChecked(),fgsProjection=fgsProjection.isChecked(),fgsPhone=fgsPhone.isChecked(),
-            jenisBuild=jenisBuild,hasApk=hasApk,hasAab=hasAab,abi=(sv(abi)=="ARM64-v8a" and "arm64" or sv(abi)=="ARMv7" and "armv7" or sv(abi)=="ARM64 + ARMv7" and "arm64armv7" or "universal"),minify=pakaiMinify,shrink=pakaiShrink,runLint=lint.isChecked(),runUnitTest=unit.isChecked(),runInstrumentation=instr.isChecked(),
-            validateWrapper=wrapper.isChecked(),failFast=failfast.isChecked(),emulatorApi=apiEmulator,push=push.isChecked(),pullRequest=pr.isChecked(),schedule=schedule.isChecked(),cache=cache.isChecked(),
-            publish=publish.isChecked(),makeRelease=release.isChecked(),attest=attest.isChecked(),retention=lamaSimpan,signing=signing.isChecked(),readme=readme.isChecked(),tema=sv(tema),orientasi=sv(orientasi),warnaIkon=w,backup=true,clearText=false,
-            javaVersion="17",gradleVersion="9.3.1",mediaGesture=media.isChecked()})
-    end})
-    b.setNegativeButton("kembali",DialogInterface.OnClickListener{onClick=function() PembuatAPK.menu(token) end})
-    local d=b.create(); d.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY); d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); d.show(); aturTombolHurufKecil(d,"buat proyek","kembali",nil)
-end
-
-local function tetapkanKembali(fullName, token, kb)
-    if kb then return kb end
-    return function() PembuatAPK.menuAplikasi(fullName, token) end
-end
-
--- Dialog dengan teks yang bisa dipilih dan daftar tombol (jumlah tombol bebas).
--- tombol: {{"label", fungsi, tetap=true}, ...}  (tetap=true: dialog tidak ditutup setelah ditekan)
--- kembali: {"label", fungsi} untuk tombol bawah
-function PembuatAPK.dialogTombol(judul, pesan, tombol, kembali, opsi)
-    opsi = opsi or {}
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(32, 16, 32, 16)
-
-    if pesan and tostring(pesan) ~= "" then
-        local tv = TextView(service)
-        tv.setText(tostring(pesan))
-        tv.setTextSize(opsi.ukuranTeks or 15)
-        tv.setTextIsSelectable(true)
-        layout.addView(tv)
-    end
-
-    local diag
-    for _, t in ipairs(tombol or {}) do
-        local btn = Button(service)
-        btn.setText(t[1])
-        pcall(function() btn.setAllCaps(false) end)
-        btn.setOnClickListener(View.OnClickListener{
-            onClick = function()
-                if not t.tetap then pcall(function() diag.dismiss() end) end
-                if t[2] then t[2]() end
-            end
-        })
-        layout.addView(btn)
-    end
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle(judul)
-    b.setView(scroll)
-    if kembali then
-        b.setNegativeButton(kembali[1], DialogInterface.OnClickListener{
-            onClick = function() if kembali[2] then kembali[2]() end end
-        })
-    end
-    diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    if kembali then aturTombolHurufKecil(diag, nil, kembali[1], nil) end
-    return diag
-end
-
--- Dialog error: rincian bisa dipilih dan ada tombol "salin keterangan error".
-function PembuatAPK.tampilError(judul, rincian, kembaliFn, tombolTambahan)
-    local teks = tostring(rincian or "Tidak ada keterangan error.")
-    local tombol = {
-        {"salin keterangan error", function() salinKeClipboard("Keterangan error", teks) end, tetap = true}
-    }
-    for _, t in ipairs(tombolTambahan or {}) do table.insert(tombol, t) end
-    if service.speak then service.speak(judul .. ". Rincian error ditampilkan, ada tombol salin.") end
-    PembuatAPK.dialogTombol(judul, teks, tombol, {"kembali", kembaliFn})
-end
-
-function PembuatAPK.ambilIdRunTerakhir(fullName, token, cb)
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/actions/runs?per_page=1"
-    kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-        local id = 0
-        if ok then
-            pcall(function()
-                local arr = JSONObject(res).optJSONArray("workflow_runs")
-                if arr ~= nil and arr.length() > 0 then
-                    id = arr.getJSONObject(0).optLong("id", 0)
-                end
-            end)
-        end
-        cb(id)
-    end, true)
-end
-
--- Dialog setelah berkas dari HP berhasil diunggah ke repo
-function PembuatAPK.setelahUnggah(fullName, token, repoObj, pathSekarang, namaDiRepo, rawUrl, htmlUrl, diperbarui)
-    local kembaliRepo = function() kelolaRepoPilihanDialog(repoObj, token) end
-    local idAwal = PembuatAPK.baselineRun[fullName] or 0
-    local pesan = "Berkas: " .. namaDiRepo .. "\nRepo: " .. fullName
-    if diperbarui then pesan = pesan .. "\n(berkas lama dengan nama sama sudah diganti)" end
-    pesan = pesan .. "\n\nJika proyek sudah lengkap, tekan Bangun APK sekarang. Jika repo ini membangun APK otomatis setiap ada perubahan, tekan Pantau pembangunan APK."
-    if service.speak then service.speak("Berkas berhasil diunggah.") end
-    PembuatAPK.dialogTombol("Berkas berhasil diunggah", pesan, {
-        {"bangun APK sekarang", function() PembuatAPK.bangunUlang(fullName, token, kembaliRepo) end},
-        {"pantau pembangunan APK", function() PembuatAPK.pantau(fullName, token, kembaliRepo, idAwal) end},
-        {"cek status APK", function() PembuatAPK.cekStatus(fullName, token, kembaliRepo) end},
-        {"unggah berkas lain", function() unggahDariMemoriHPDialog(fullName, token, repoObj, pathSekarang) end},
-        {"salin tautan raw", function() salinKeClipboard("Tautan raw", rawUrl) end, tetap = true},
-        {"bagikan tautan", function() bagikanTautan("Berkas: " .. namaDiRepo, rawUrl ~= "" and rawUrl or htmlUrl) end, tetap = true},
-    }, {"kembali", kembaliRepo})
-end
-
--- Tampilkan hasil satu proses pembangunan (berhasil / gagal / berjalan)
-function PembuatAPK.tampilkanHasilRun(fullName, token, run, kembali)
-    local status = run.optString("status", "")
-    local kesimpulan = run.optString("conclusion", "")
-    local teksStatus = terjemahStatus(status, kesimpulan)
-    local logUrl = run.optString("html_url", "")
-    local runId = run.optLong("id", 0)
-    local nomor = run.optInt("run_number", 0)
-    local judulRun = run.optString("display_title", run.optString("name", ""))
-
-    local pesan = "Proyek: " .. fullName .. "\nPembangunan nomor: " .. tostring(nomor)
-    if judulRun ~= "" then pesan = pesan .. "\nKeterangan: " .. judulRun end
-    pesan = pesan .. "\nStatus: " .. teksStatus
-
-    local ulang = function() PembuatAPK.bangunUlang(fullName, token, kembali) end
-    local web = function() bukaBrowser(logUrl) end
-
-    if status == "completed" and kesimpulan == "success" then
-        pesan = pesan .. "\n\nAPK sudah selesai dan rilisnya siap diunduh."
-        PembuatAPK.dialogTombol("Pembangunan APK berhasil", pesan, {
-            {"unduh APK", function() PembuatAPK.ambilAPK(fullName, token, kembali) end},
-            {"bangun ulang", ulang},
-            {"buka halaman proses di web", web},
-        }, {"kembali", kembali})
-    elseif status == "completed" then
-        pesan = pesan .. "\n\nPembangunan tidak berhasil. Tekan Rincian error untuk melihat penyebabnya, lalu tekan salin bila perlu."
-        PembuatAPK.dialogTombol("Pembangunan APK gagal", pesan, {
-            {"rincian error", function() PembuatAPK.bacaLogError(fullName, token, runId, logUrl, kembali) end},
-            {"bangun ulang", ulang},
-            {"buka log di web", web},
-        }, {"kembali", kembali})
+local function replaceText(node, text)
+  if not node then return end
+  local ok = pcall(function()
+    if Build.VERSION.SDK_INT >= 21 then
+      local args = Bundle()
+      args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+      node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     else
-        pesan = pesan .. "\n\nPembangunan masih berjalan."
-        PembuatAPK.dialogTombol("Pembangunan sedang berjalan", pesan, {
-            {"pantau otomatis", function() PembuatAPK.pantau(fullName, token, kembali, 0) end},
-            {"periksa lagi", function() PembuatAPK.cekStatus(fullName, token, kembali) end},
-            {"buka di web", web},
-        }, {"kembali", kembali})
+      service.setText(node, text)
     end
-    if service.speak then service.speak("Status pembangunan: " .. teksStatus) end
+  end)
+  if not ok then
+    pcall(function() service.insert(node, text) end)
+  end
 end
 
--- Pantau otomatis sampai pembangunan selesai, lalu hasilnya muncul sendiri
-function PembuatAPK.pantau(fullName, token, kb, idAwal)
-    local kembali = tetapkanKembali(fullName, token, kb)
-    idAwal = idAwal or 0
-    local aktif = true
-    local mulai = os.time()
-    local statusTerakhir = ""
-    local gagalBeruntun = 0
-    local JEDA_MS = 10000
-    local MAKS_TUNGGU_MUNCUL = 120
-    local MAKS_TOTAL = 2700
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/actions/runs?per_page=1"
+local function showDialog(dialog)
+  dialog.show()
+  return dialog
+end
 
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(32, 24, 32, 16)
-    local tv = TextView(service)
-    tv.setTextSize(15)
-    tv.setText("Menunggu GitHub memulai pembangunan APK...")
-    layout.addView(tv)
-
-    local diag
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Memantau pembangunan APK")
-    b.setView(layout)
-    b.setNeutralButton("lihat status", DialogInterface.OnClickListener{
-        onClick = function()
-            aktif = false
-            PembuatAPK.cekStatus(fullName, token, kembali)
-        end
-    })
-    b.setNegativeButton("berhenti memantau", DialogInterface.OnClickListener{
-        onClick = function()
-            aktif = false
-            kembali()
-        end
-    })
-    b.setOnDismissListener(DialogInterface.OnDismissListener{
-        onDismiss = function() aktif = false end
-    })
-    diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "berhenti memantau", "lihat status")
-    if service.speak then service.speak("Memantau pembangunan APK. Hasilnya akan muncul otomatis.") end
-
-    local tick
-    local function jadwalkan()
-        mainHandler.postDelayed(Runnable{ run = function() tick() end }, JEDA_MS)
+local function showPengaturanTTS()
+  local layT = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+  layT.addView(TextView(service).setText("Pilih Mesin TTS:").setTypeface(Typeface.DEFAULT_BOLD))
+  
+  local engineNames = {}
+  local enginePkgs = {}
+  local dummyTts = TextToSpeech(service, nil)
+  local engines = dummyTts.getEngines()
+  if engines then
+    for i = 0, engines.size() - 1 do
+      local eng = engines.get(i)
+      table.insert(engineNames, tostring(eng.label))
+      table.insert(enginePkgs, tostring(eng.name))
     end
+  end
+  pcall(function() dummyTts.shutdown() end)
+  
+  if #engineNames == 0 then
+    table.insert(engineNames, "Default System TTS")
+    table.insert(enginePkgs, "")
+  end
 
-    tick = function()
-        if not aktif then return end
-        if os.time() - mulai > MAKS_TOTAL then
-            aktif = false
-            pcall(function() diag.dismiss() end)
-            PembuatAPK.tampilError("Pemantauan dihentikan",
-                "Pemantauan sudah lebih dari 45 menit tanpa hasil.\nProyek: " .. fullName,
-                kembali,
-                {{"periksa status", function() PembuatAPK.cekStatus(fullName, token, kembali) end}})
-            return
-        end
-        kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-            if not aktif then return end
-            local run = nil
-            if ok then
-                gagalBeruntun = 0
-                pcall(function()
-                    local arr = JSONObject(res).optJSONArray("workflow_runs")
-                    if arr ~= nil and arr.length() > 0 then run = arr.getJSONObject(0) end
-                end)
-            else
-                gagalBeruntun = gagalBeruntun + 1
-                if gagalBeruntun >= 5 then
-                    aktif = false
-                    pcall(function() diag.dismiss() end)
-                    PembuatAPK.tampilError("Gagal memantau pembangunan",
-                        "Proyek: " .. fullName .. "\n\n" .. tostring(res), kembali,
-                        {{"pantau lagi", function() PembuatAPK.pantau(fullName, token, kembali, idAwal) end}})
-                    return
-                end
-            end
+  local spinEngine = Spinner(service).setAdapter(ArrayAdapter(service, android.R.layout.simple_spinner_dropdown_item, engineNames))
+  local curEngine = getPref("tts_engine", "")
+  for i, pkg in ipairs(enginePkgs) do
+    if pkg == curEngine then spinEngine.setSelection(i-1) break end
+  end
+  layT.addView(spinEngine)
 
-            local lewat = os.time() - mulai
-            if run ~= nil and run.optLong("id", 0) > idAwal then
-                local status = run.optString("status", "")
-                if status == "completed" then
-                    aktif = false
-                    pcall(function() diag.dismiss() end)
-                    PembuatAPK.tampilkanHasilRun(fullName, token, run, kembali)
-                    return
-                end
-                local teksStatus = terjemahStatus(status, "")
-                tv.setText("Status: " .. teksStatus .. "\nWaktu pemantauan: " ..
-                    math.floor(lewat / 60) .. " menit " .. (lewat % 60) .. " detik\n\nHasil akan muncul otomatis saat pembangunan selesai.")
-                if status ~= statusTerakhir then
-                    statusTerakhir = status
-                    if service.speak then service.speak("Status pembangunan: " .. teksStatus) end
-                end
-            elseif lewat > MAKS_TUNGGU_MUNCUL then
-                aktif = false
-                pcall(function() diag.dismiss() end)
-                PembuatAPK.dialogTombol("Belum ada pembangunan baru",
-                    "GitHub belum memulai pembangunan APK baru di repo ini. Kemungkinan repo tidak membangun otomatis saat berkas diunggah.\n\nTekan Bangun APK sekarang untuk memulai secara manual.",
-                    {
-                        {"bangun APK sekarang", function() PembuatAPK.bangunUlang(fullName, token, kembali) end},
-                        {"lihat status terakhir", function() PembuatAPK.cekStatus(fullName, token, kembali) end},
-                    }, {"kembali", kembali})
-                return
-            else
-                tv.setText("Menunggu GitHub memulai pembangunan... (" .. lewat .. " detik)")
-            end
-            jadwalkan()
-        end, true)
+  local curPitch = tonumber(getPref("tts_pitch", "100")) or 100
+  local txtPitch = TextView(service).setText("\nNada (Pitch): " .. string.format("%.1f", curPitch / 100) .. "x")
+  local skPitch = SeekBar(service).setMax(200)
+  skPitch.setProgress(curPitch)
+  skPitch.setOnSeekBarChangeListener{onProgressChanged=function(bar, prog)
+    if prog < 20 then prog = 20 end
+    txtPitch.setText("\nNada (Pitch): " .. string.format("%.1f", prog / 100) .. "x")
+    setPref("tts_pitch", tostring(prog))
+  end}
+  layT.addView(txtPitch)
+  layT.addView(skPitch)
+
+  local curRate = tonumber(getPref("tts_rate", "100")) or 100
+  local txtRate = TextView(service).setText("\nKecepatan (Speed): " .. string.format("%.1f", curRate / 100) .. "x")
+  local skRate = SeekBar(service).setMax(200)
+  skRate.setProgress(curRate)
+  skRate.setOnSeekBarChangeListener{onProgressChanged=function(bar, prog)
+    if prog < 20 then prog = 20 end
+    txtRate.setText("\nKecepatan (Speed): " .. string.format("%.1f", prog / 100) .. "x")
+    setPref("tts_rate", tostring(prog))
+  end}
+  layT.addView(txtRate)
+  layT.addView(skRate)
+
+  local dlg = LuaDialog(service)
+  dlg.setTitle("Pengaturan TTS")
+  dlg.setView(layT)
+  dlg.setPositiveButton("Simpan", {onClick=function()
+    local selectedIdx = spinEngine.getSelectedItemPosition() + 1
+    if enginePkgs[selectedIdx] then
+      setPref("tts_engine", enginePkgs[selectedIdx])
     end
-
-    tick()
+    pesan("Pengaturan TTS disimpan sementara!")
+  end})
+  dlg.setNegativeButton("Batal", nil)
+  dlg.show()
 end
 
-function PembuatAPK.bacaLogError(fullName, token, runId, logUrl, kb)
-    local kembali = tetapkanKembali(fullName, token, kb)
-    local progress = ProgressDialog(service)
-    progress.setTitle("Menganalisis Error")
-    progress.setMessage("Mengambil rincian kegagalan build...")
-    progress.setCancelable(true)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-
-    local bukaWeb = {{"buka log di web", function() bukaBrowser(logUrl) end}}
-    local endpointJobs = "https://api.github.com/repos/" .. fullName .. "/actions/runs/" .. tostring(runId) .. "/jobs"
-    kirimPermintaanGitHub("GET", endpointJobs, token, nil, function(okJobs, resJobs)
-        if not okJobs then
-            pcall(function() progress.dismiss() end)
-            PembuatAPK.tampilError("Gagal memeriksa rincian build",
-                "Proyek: " .. fullName .. "\nRun ID: " .. tostring(runId) .. "\n\n" .. tostring(resJobs),
-                kembali, bukaWeb)
-            return
-        end
-
-        local targetJobId = nil
-        local namaJob = "Tidak diketahui"
-        local namaLangkahGagal = "Tidak diketahui"
-
-        pcall(function()
-            local jobsArr = JSONObject(resJobs).optJSONArray("jobs")
-            if jobsArr ~= nil then
-                for i = 0, jobsArr.length() - 1 do
-                    local j = jobsArr.getJSONObject(i)
-                    local kes = j.optString("conclusion", "")
-                    if kes == "failure" or kes == "timed_out" or kes == "cancelled" then
-                        targetJobId = j.optLong("id", 0)
-                        namaJob = j.optString("name", namaJob)
-                        local stepsArr = j.optJSONArray("steps")
-                        if stepsArr ~= nil then
-                            for k = 0, stepsArr.length() - 1 do
-                                local st = stepsArr.getJSONObject(k)
-                                local ks = st.optString("conclusion", "")
-                                if ks == "failure" or ks == "timed_out" or ks == "cancelled" then
-                                    namaLangkahGagal = st.optString("name", "Kompilasi")
-                                    break
-                                end
-                            end
-                        end
-                        break
-                    end
-                end
-            end
-        end)
-
-        if not targetJobId or targetJobId == 0 then
-            pcall(function() progress.dismiss() end)
-            PembuatAPK.tampilError("Rincian Error",
-                "Proyek: " .. fullName .. "\nRun ID: " .. tostring(runId) ..
-                "\n\nTidak ditemukan langkah yang gagal. Kemungkinan berkas alur kerja (.github/workflows) salah tulis sehingga proses tidak bisa dimulai, atau proses dibatalkan.\n\nBuka log di web untuk melihat pesan dari GitHub:\n" .. tostring(logUrl),
-                kembali, bukaWeb)
-            return
-        end
-
-        pcall(function() progress.setMessage("Mengunduh teks log dari GitHub...") end)
-
-        local header = "Proyek: " .. fullName .. "\nRun ID: " .. tostring(runId) ..
-            "\nJob: " .. namaJob .. "\nLangkah gagal: " .. namaLangkahGagal
-
-        Thread(Runnable{
-            run = function()
-                local okLog, hasilLog = pcall(function()
-                    local urlStr = "https://api.github.com/repos/" .. fullName .. "/actions/jobs/" .. tostring(targetJobId) .. "/logs"
-                    local url = URL(urlStr)
-                    local conn = url.openConnection()
-                    conn.setRequestMethod("GET")
-                    conn.setRequestProperty("Authorization", "Bearer " .. token)
-                    conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                    conn.setConnectTimeout(15000)
-                    conn.setReadTimeout(30000)
-
-                    local code = conn.getResponseCode()
-                    if code == 301 or code == 302 or code == 303 or code == 307 or code == 308 then
-                        local redir = conn.getHeaderField("Location")
-                        conn.disconnect()
-                        url = URL(redir)
-                        conn = url.openConnection()
-                        conn.setRequestMethod("GET")
-                        conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                        conn.setConnectTimeout(15000)
-                        conn.setReadTimeout(30000)
-                    elseif code >= 400 then
-                        error("Kode " .. tostring(code) .. " saat mengambil log (log mungkin sudah kedaluwarsa atau token tidak punya izin).")
-                    end
-
-                    local is = conn.getInputStream()
-                    local reader = BufferedReader(InputStreamReader(is, "UTF-8"))
-                    local barisLog = {}
-                    local l = reader.readLine()
-                    while l ~= nil do
-                        table.insert(barisLog, tostring(l))
-                        if #barisLog > 3000 then table.remove(barisLog, 1) end
-                        l = reader.readLine()
-                    end
-                    reader.close()
-                    is.close()
-                    conn.disconnect()
-                    return barisLog
-                end)
-
-                mainHandler.post(Runnable{
-                    run = function()
-                        pcall(function() progress.dismiss() end)
-                        if not okLog or not hasilLog or #hasilLog == 0 then
-                            PembuatAPK.tampilError("Gagal Mengambil Log",
-                                header .. "\n\nTidak dapat membaca berkas log:\n" .. tostring(hasilLog),
-                                kembali, bukaWeb)
-                            return
-                        end
-
-                        local function bersihkan(baris)
-                            local c = baris:gsub("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+Z%s*", "")
-                            return c
-                        end
-
-                        local dipilih = {}
-                        for idx, baris in ipairs(hasilLog) do
-                            local lower = baris:lower()
-                            if lower:find("what went wrong") then
-                                for k = idx, math.min(#hasilLog, idx + 8) do dipilih[k] = true end
-                            elseif lower:find("error:") or lower:find("##%[error%]") or lower:find("failure:")
-                                or lower:find("failed") or lower:find("cannot find symbol") or lower:find("exception") then
-                                dipilih[idx] = true
-                            end
-                        end
-
-                        local ringkasan = {}
-                        for i = 1, #hasilLog do
-                            if dipilih[i] then table.insert(ringkasan, bersihkan(hasilLog[i])) end
-                        end
-                        if #ringkasan > 40 then
-                            local potong = {}
-                            for i = #ringkasan - 39, #ringkasan do table.insert(potong, ringkasan[i]) end
-                            ringkasan = potong
-                        end
-                        if #ringkasan == 0 then
-                            for i = math.max(1, #hasilLog - 29), #hasilLog do
-                                table.insert(ringkasan, bersihkan(hasilLog[i]))
-                            end
-                        end
-
-                        local lengkap = {}
-                        for i = math.max(1, #hasilLog - 299), #hasilLog do
-                            table.insert(lengkap, bersihkan(hasilLog[i]))
-                        end
-
-                        local teksGabungan = header .. "\n\n--- Rincian Error ---\n" .. table.concat(ringkasan, "\n")
-                        local teksLengkap = header .. "\n\n--- Log (300 baris terakhir) ---\n" .. table.concat(lengkap, "\n")
-
-                        if service.speak then service.speak("Langkah gagal: " .. namaLangkahGagal .. ". Rincian error ditampilkan, ada tombol salin.") end
-
-                        PembuatAPK.dialogTombol("Hasil Analisis Error APK", teksGabungan, {
-                            {"salin keterangan error", function() salinKeClipboard("Keterangan error APK", teksGabungan) end, tetap = true},
-                            {"salin log lengkap", function() salinKeClipboard("Log lengkap APK", teksLengkap) end, tetap = true},
-                            {"buka log di web", function() bukaBrowser(logUrl) end},
-                        }, {"kembali", kembali}, {ukuranTeks = 13})
-                    end
-                })
-            end
-        }).start()
-    end, true)
+local function applySingkatan(teks)
+  if not getBool("use_singkatan") then return teks end
+  local daftarAngka2 = {"sama", "teman", "jalan", "makan", "hati", "hati%-hati"}
+  for _, kata in ipairs(daftarAngka2) do
+    teks = teks:gsub("%f[%a]"..kata.."%s+"..kata.."%f[%A]", kata.."2")
+    teks = teks:gsub("%f[%a]"..kata.."%-"..kata.."%f[%A]", kata.."2")
+  end
+  local s = {
+    ["yang"] = "yg", ["dengan"] = "dg", ["untuk"] = "utk", ["tidak"] = "tdk",
+    ["ngggak"] = "gk", ["kamu"] = "km", ["saya"] = "sy", ["sudah"] = "sdh",
+    ["bang"] = "bg", ["kakak"] = "kk", ["kenapa"] = "knp", ["gimana"] = "gmn",
+    ["sekarang"] = "skrg", ["banget"] = "bgt", ["tapi"] = "tp", ["kalo"] = "kl",
+    ["terima kasih"] = "tks",
+  }
+  for k, v in pairs(s) do
+    teks = teks:gsub("%f[%a]"..k.."%f[%A]", v)
+    local kapital = k:sub(1,1):upper()..k:sub(2)
+    local v_kapital = v:sub(1,1):upper()..v:sub(2)
+    teks = teks:gsub("%f[%a]"..kapital.."%f[%A]", v_kapital)
+  end
+  return teks
 end
 
-function PembuatAPK.cekStatus(fullName, token, kb)
-    local kembali = tetapkanKembali(fullName, token, kb)
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/actions/runs?per_page=1"
-    kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-        if not ok then
-            PembuatAPK.tampilError("Gagal memeriksa status",
-                "Proyek: " .. fullName .. "\n\n" .. tostring(res), kembali,
-                {{"coba lagi", function() PembuatAPK.cekStatus(fullName, token, kembali) end}})
-            return
-        end
-        local run = nil
-        pcall(function()
-            local arr = JSONObject(res).optJSONArray("workflow_runs")
-            if arr ~= nil and arr.length() > 0 then run = arr.getJSONObject(0) end
-        end)
-        if run == nil then
-            PembuatAPK.dialogTombol("Status pembangunan",
-                "Proyek: " .. fullName .. "\n\nBelum ada pembangunan APK yang tercatat di repo ini. Tekan Bangun APK sekarang untuk memulai.",
-                {{"bangun APK sekarang", function() PembuatAPK.bangunUlang(fullName, token, kembali) end}},
-                {"kembali", kembali})
-            return
-        end
-        PembuatAPK.tampilkanHasilRun(fullName, token, run, kembali)
-    end)
+local function applyGaya(t)
+  if getBool("use_gaya_vokal") then
+    local vokalCharSet = getPref("vokal_char_set", "AIUEO")
+    local n = tonumber(getPref("vokal_count", "2")) or 2
+    if vokalCharSet == "Cadel C" then
+      t = t:gsub("[rlk]", "c"):gsub("[RLK]", "C")
+    elseif vokalCharSet == "AIUEO" then
+      t = t:gsub("([aiueoAIUEO])", function(v) return v:rep(n) end)
+    elseif vokalCharSet == "A" then
+      t = t:gsub("([aA])", function(v) return v:rep(n) end)
+    elseif vokalCharSet == "I" then
+      t = t:gsub("([iI])", function(v) return v:rep(n) end)
+    end
+  end
+  return t
 end
 
-local function unduhLangsungKeFolderDownload(urlDownload, namaFileSimpan, tokenAuth, isZipArtifact, kembali, octet, urlCadangan)
-    local progress = ProgressDialog(service)
-    progress.setTitle("Mengunduh APK")
-    progress.setMessage("Sedang mengunduh " .. namaFileSimpan .. " langsung ke folder Download...")
-    progress.setCancelable(false)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
+-- ================ DATA FITUR KATEGORI ================
+local AI_FEATURES = {
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Sederhana", prompt_template = "Jelaskan konsep ini dengan analogi sederhana sehingga mudah dipahami oleh anak 5 tahun."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Akademik", prompt_template = "Jelaskan konsep ini secara mendalam dengan contoh-contoh akademis."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Rangkuman Artikel", prompt_template = "Rangkum artikel atau teks panjang ini menjadi poin-poin utama."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Soal Pilihan Ganda", prompt_template = "Buat 5 soal pilihan ganda dari teks input ini. Sertakan kunci jawabannya."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Soal Esai", prompt_template = "Buat 3 soal esai berdasarkan materi dari teks input ini."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Ringkasan Bab Buku", prompt_template = "Buat ringkasan bab buku dari input teks."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Peta Konsep", prompt_template = "Buat peta konsep (mind map) dari materi yang diinput."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Istilah Hukum", prompt_template = "Jelaskan istilah hukum yang disebutkan secara ringkas."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Istilah Medis", prompt_template = "Jelaskan istilah medis yang disebutkan secara ringkas."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Daftar Fakta Menarik", prompt_template = "Sebutkan 10 fakta unik yang relevan dengan topik di teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Soal Benar/Salah", prompt_template = "Buat 5 soal benar/salah dari teks input ini. Sertakan kunci jawabannya."},
+  {category = "Edukasi & Pembelajaran", title = "Rekomendasi Buku Bacaan", prompt_template = "Rekomendasikan 5 buku bacaan populer tentang topik di teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Matematika", prompt_template = "Jelaskan konsep matematika [Sebutkan konsep] dengan contoh soal."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Fisika", prompt_template = "Jelaskan konsep fisika [Sebutkan konsep] dengan contoh sederhana."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Sejarah", prompt_template = "Jelaskan peristiwa sejarah [Sebutkan peristiwa] secara ringkas."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Biologi", prompt_template = "Jelaskan konsep biologi [Sebutkan konsep] dengan analogi."},
+  {category = "Edukasi & Pembelajaran", title = "Tulis Rangkuman Jurnal Ilmiah", prompt_template = "Rangkum jurnal ilmiah yang diinput (masalah, metodologi, hasil, kesimpulan)."},
+  {category = "Edukasi & Pembelajaran", title = "Daftar Topik Penelitian", prompt_template = "Berikan 5 ide topik penelitian yang relevan dengan subjek di teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Catatan Kuliah Ringkas", prompt_template = "Buat catatan kuliah yang rapi dari input materi. Gunakan poin-poin penting."},
+  {category = "Edukasi & Pembelajaran", title = "Saran Topik Esai", prompt_template = "Berikan 5 ide topik esai yang relevan dengan tema di teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Perbaiki Argumen Logis", prompt_template = "Perbaiki argumen logis dalam teks input agar lebih kuat dan valid."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Draf Proposal Penelitian", prompt_template = "Buat draf proposal penelitian sederhana (latar belakang, rumusan masalah, tujuan)."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Teori Ekonomi", prompt_template = "Jelaskan teori ekonomi [Sebutkan teori] dengan contoh sederhana."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Teori Filsafat", prompt_template = "Jelaskan teori filsafat [Sebutkan teori] dengan contoh sederhana."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Rangkuman Berita", prompt_template = "Rangkum berita dari teks input menjadi poin-poin utama."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Teks Presentasi PowerPoint", prompt_template = "Buat teks presentasi untuk PowerPoint berdasarkan input materi."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Sains", prompt_template = "Jelaskan konsep sains [Sebutkan konsep] dengan mudah."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Daftar Pertanyaan Interview Ahli", prompt_template = "Buat 5 pertanyaan interview untuk narasumber ahli di bidang [Sebutkan bidang]."},
+  {category = "Edukasi & Pembelajaran", title = "Tulis Ulasan Akademik", prompt_template = "Tulis ulasan akademik tentang buku atau jurnal [Sebutkan judul]."},
+  {category = "Edukasi & Pembelajaran", title = "Perbaiki Kutipan & Daftar Pustaka", prompt_template = "Perbaiki format kutipan dan daftar pustaka (APA Style) dari teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Kebudayaan", prompt_template = "Jelaskan konsep kebudayaan [Sebutkan konsep] dengan contoh."},
+  {category = "Edukasi & Pembelajaran", title = "Tulis Draf Tugas Akhir/Skripsi", prompt_template = "Buat draf pendahuluan untuk tugas akhir/skripsi dengan topik [Sebutkan topik]."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Kuis Interaktif", prompt_template = "Buat 5 pertanyaan kuis interaktif dari teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Saran Topik Diskusi Kelompok", prompt_template = "Berikan 5 ide topik diskusi kelompok yang relevan dengan input."},
+  {category = "Edukasi & Pembelajaran", title = "Daftar Tokoh Sejarah", prompt_template = "Buat daftar tokoh sejarah penting yang relevan dengan input topik."},
+  {category = "Edukasi & Pembelajaran", title = "Jelaskan Konsep Geografi", prompt_template = "Jelaskan konsep geografi [Sebutkan konsep] dengan contoh."},
+  {category = "Edukasi & Pembelajaran", title = "Ubah Teks Menjadi Infografis", prompt_template = "Ubah teks input menjadi poin-poin untuk infografis."},
+  {category = "Edukasi & Pembelajaran", title = "Buat Ringkasan Berita Sains", prompt_template = "Ringkas berita sains terbaru dari teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Saran Topik Penelitian Lanjutan", prompt_template = "Berikan 3 saran topik penelitian lanjutan dari teks input."},
+  {category = "Edukasi & Pembelajaran", title = "Analisis Teks Kritis", prompt_template = "Lakukan analisis kritis terhadap teks input (keunggulan, kelemahan, asumsi)."},
 
-    if service.speak then service.speak("Mulai mengunduh berkas APK ke folder Download.") end
+  {category = "Programming & Data", title = "Koreksi Kode Python", prompt_template = "Temukan error dan perbaiki kode Python ini. Jelaskan perubahannya."},
+  {category = "Programming & Data", title = "Tulis Kode Python (Sederhana)", prompt_template = "Tuliskan kode Python sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Koreksi Kode Lua", prompt_template = "Temukan error dan perbaiki kode Lua ini. Jelaskan perubahannya."},
+  {category = "Programming & Data", title = "Tulis Kode Lua (Sederhana)", prompt_template = "Tuliskan kode Lua sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Tulis Kode HTML", prompt_template = "Tuliskan kode HTML sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Buat Struktur JSON", prompt_template = "Konversi informasi dalam teks ini ke format JSON yang terstruktur. Contoh: {key: value, ...}."},
+  {category = "Programming & Data", title = "Teks ke Tabel CSV", prompt_template = "Susun informasi dari teks input menjadi format tabel CSV."},
+  {category = "Programming & Data", title = "Teks ke Struktur Markdown", prompt_template = "Format teks ini ke format Markdown yang rapi."},
+  {category = "Programming & Data", title = "Buat Query SQL", prompt_template = "Tuliskan query SQL berdasarkan permintaan data yang ada di teks input."},
+  {category = "Programming & Data", title = "Tulis Dokumentasi Kode", prompt_template = "Tuliskan dokumentasi yang jelas untuk potongan kode yang diinput."},
+  {category = "Programming & Data", title = "Tulis Kode JavaScript (Sederhana)", prompt_template = "Tuliskan kode JavaScript sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Tulis Kode PHP (Sederhana)", prompt_template = "Tuliskan kode PHP sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Tulis Kode Java (Sederhana)", prompt_template = "Tuliskan kode Java sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Optimasi Kode", prompt_template = "Optimalkan kode ini agar berjalan lebih cepat dan efisien. Jelaskan perubahannya."},
+  {category = "Programming & Data", title = "Cari Error Code", prompt_template = "Identifikasi error dalam kode ini dan berikan solusinya."},
+  {category = "Programming & Data", title = "Buat RegEx", prompt_template = "Buat ekspresi reguler (RegEx) berdasarkan pola yang diinput."},
+  {category = "Programming & Data", title = "Jelaskan Konsep Programming", prompt_template = "Jelaskan konsep programming [Sebutkan konsep] dengan contoh kode sederhana."},
+  {category = "Programming & Data", title = "Buat Struktur Data", prompt_template = "Buat struktur data (array, list, dictionary) dari teks input."},
+  {category = "Programming & Data", title = "Tulis Kode CSS", prompt_template = "Tuliskan kode CSS sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Debug Code JavaScript", prompt_template = "Debug kode JavaScript ini dan perbaiki kesalahannya."},
+  {category = "Programming & Data", title = "Tulis Kode GoLang (Sederhana)", prompt_template = "Tuliskan kode GoLang sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Tulis Kode C# (Sederhana)", prompt_template = "Tuliskan kode C# sederhana berdasarkan deskripsi input."},
+  {category = "Programming & Data", title = "Jelaskan Konsep Data Science", prompt_template = "Jelaskan konsep data science [Sebutkan konsep] dengan mudah."},
+  {category = "Programming & Data", title = "Buat Template Boilerplate Code", prompt_template = "Buat template boilerplate code untuk [Sebutkan bahasa/framework]."},
+  {category = "Programming & Data", title = "Tulis Kode Shell Script", prompt_template = "Tuliskan kode shell script sederhana untuk otomatisasi tugas."},
+  {category = "Programming & Data", title = "Buat Dokumentasi API", prompt_template = "Buat dokumentasi API sederhana dari input endpoint."},
+  {category = "Programming & Data", title = "Konversi Kode (Python -> Java)", prompt_template = "Konversi kode Python ini ke dalam bahasa Java."},
+  {category = "Programming & Data", title = "Konversi Kode (Java -> Python)", prompt_template = "Konversi kode Java ini ke dalam bahasa Python."},
+  {category = "Programming & Data", title = "Tulis Code Review", prompt_template = "Berikan ulasan kode (code review) untuk potongan kode ini."},
+  {category = "Programming & Data", title = "Analisis Kompleksitas Algoritma", prompt_template = "Analisis kompleksitas waktu dan ruang dari algoritma ini."},
+  {category = "Programming & Data", title = "Buat Skrip Otomatisasi", prompt_template = "Buat skrip otomatisasi sederhana (misal: Python/Shell) untuk tugas tertentu."},
+  {category = "Programming & Data", title = "Buat Query MongoDB", prompt_template = "Tuliskan query MongoDB (JSON) berdasarkan permintaan data."},
+  {category = "Programming & Data", title = "Jelaskan Arsitektur Software", prompt_template = "Jelaskan arsitektur software [Sebutkan arsitektur] dengan contoh."},
+  {category = "Programming & Data", title = "Tulis Code Snippet React", prompt_template = "Tuliskan code snippet React functional component untuk [Sebutkan fungsi]."},
+  {category = "Programming & Data", title = "Jelaskan Konsep AI/ML", prompt_template = "Jelaskan konsep AI/ML [Sebutkan konsep] dengan contoh."},
+  {category = "Programming & Data", title = "Buat Draf Spesifikasi Teknis", prompt_template = "Buat draf spesifikasi teknis sederhana untuk [Sebutkan proyek]."},
+  {category = "Programming & Data", title = "Tulis Test Case Otomatis", prompt_template = "Tuliskan test case otomatis (unit test) untuk kode ini."},
+  {category = "Programming & Data", title = "Buat Draf Git Commit Message", prompt_template = "Buat draf pesan Git commit yang deskriptif untuk perubahan kode ini."},
+  {category = "Programming & Data", title = "Jelaskan Error Python", prompt_template = "Jelaskan error Python ini dan berikan solusinya."},
+  {category = "Programming & Data", title = "Tulis Kode C++ (Sederhana)", prompt_template = "Tuliskan kode C++ sederhana berdasarkan deskripsi input."},
 
-    Thread(Runnable{
-        run = function()
-            local function ambil(urlD, authD, octetD)
-                local url = URL(urlD)
-                local conn = url.openConnection()
-                conn.setRequestMethod("GET")
-                conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                if octetD then conn.setRequestProperty("Accept", "application/octet-stream") end
-                if authD and authD ~= "" then
-                    conn.setRequestProperty("Authorization", "Bearer " .. authD)
-                end
-                conn.setConnectTimeout(20000)
-                conn.setReadTimeout(60000)
+  {category = "Fitur Khusus & Lainnya", title = "Diktasi Standar (Instruksi Default)", prompt_template = "Perbaiki ejaan, tata bahasa, dan tanda baca dari teks ini. Pertahankan gaya bahasa aslinya."},
+  {category = "Fitur Khusus & Lainnya", title = "Roleplay sebagai AI Santai", prompt_template = "Berperan sebagai asisten AI yang santai dan humoris. Jawab pertanyaan dengan gaya gaul."},
+  {category = "Fitur Khusus & Lainnya", title = "Roleplay sebagai AI Formal", prompt_template = "Berperan sebagai asisten AI yang profesional dan formal. Jawab pertanyaan dengan bahasa baku."},
+  {category = "Fitur Khusus & Lainnya", title = "Roleplay sebagai Kritikus Film", prompt_template = "Berperan sebagai kritikus film. Berikan ulasan mendalam tentang film yang disebutkan."},
+  {category = "Fitur Khusus & Lainnya", title = "Prediksi Hasil Situasi", prompt_template = "Prediksi kemungkinan hasil atau konsekuensi dari situasi yang dijelaskan di teks input."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Peta Pikiran (Mind Map)", prompt_template = "Buat peta pikiran terstruktur dari teks input ini."},
+  {category = "Fitur Khusus & Lainnya", title = "Teks ke Tabel HTML", prompt_template = "Konversi informasi dari teks input menjadi tabel HTML."},
+  {category = "Fitur Khusus & Lainnya", title = "Teks ke Tweet", prompt_template = "Ubah teks panjang ini menjadi tweet yang ringkas dan menarik (maksimal 280 karakter)."},
+  {category = "Fitur Khusus & Lainnya", title = "Teks ke Instagram Story", prompt_template = "Ubah teks ini menjadi poin-poin singkat yang cocok untuk Instagram Story."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Catatan Harian", prompt_template = "Buat catatan harian dari input kegiatan."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Rencana Harian", prompt_template = "Buat rencana harian terstruktur dari input tujuan."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Daftar Belanja", prompt_template = "Buat daftar belanja dari input kebutuhan."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Perbandingan", prompt_template = "Buat perbandingan antara dua hal yang disebutkan di teks input (misal: A vs B)."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Teks Promosi Webinar", prompt_template = "Buat teks promosi untuk webinar (judul, deskripsi, pembicara)."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Review Produk/Jasa", prompt_template = "Tulis ulasan produk atau jasa (positif/negatif) berdasarkan input pengalaman."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Deskripsi Tempat Wisata", prompt_template = "Buat deskripsi tempat wisata yang menarik berdasarkan nama tempat."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Teks Pemandu Wisata", prompt_template = "Buat teks narasi untuk pemandu wisata tentang tempat [Sebutkan tempat]."},
+  {category = "Fitur Khusus & Lainnya", title = "Analisis Teks Kritis", prompt_template = "Lakukan analisis kritis terhadap teks input (keunggulan, kelemahan, asumsi)."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Deskripsi Pameran Seni", prompt_template = "Buat deskripsi untuk pameran seni berdasarkan input tema."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Rencana Anggaran Pribadi", prompt_template = "Buat rencana anggaran bulanan sederhana berdasarkan input penghasilan dan pengeluaran."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Daftar Barang Bawaan Liburan", prompt_template = "Buat daftar barang bawaan yang harus dibawa saat liburan ke [Sebutkan tempat]."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Draf Permintaan Donasi", prompt_template = "Buat draf teks permintaan donasi untuk kegiatan sosial."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Deskripsi Event", prompt_template = "Buat deskripsi event (seminar, konser, dll) yang menarik."},
+  {category = "Fitur Khusus & Lainnya", title = "Saran Topik Diskusi", prompt_template = "Berikan 5 ide topik diskusi yang relevan dengan input."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Kuis Interaktif", prompt_template = "Buat 5 pertanyaan kuis interaktif dari teks input."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Draf Rangkuman Buku", prompt_template = "Rangkum buku [Sebutkan judul] menjadi poin-poin penting."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Peringkasan Dokumen", prompt_template = "Ringkas dokumen panjang menjadi inti-inti utamanya."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Panggilan Telepon Darurat", prompt_template = "Buat skrip panggilan telepon darurat (misal: melaporkan kecelakaan)."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Draf Laporan Cuaca", prompt_template = "Tulis draf laporan cuaca harian berdasarkan data input."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Rencana Belajar Mandiri", prompt_template = "Buat rencana belajar mandiri 30 hari untuk topik [Sebutkan topik]."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Draf Pesan Balasan Otomatis", prompt_template = "Buat draf pesan balasan otomatis untuk email atau chat."},
+  {category = "Fitur Khusus & Lainnya", title = "Jelaskan Konsep Dasar Investasi", prompt_template = "Jelaskan konsep dasar investasi [Sebutkan konsep] dengan analogi sederhana."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Rencana Pensiun Sederhana", prompt_template = "Buat rencana pensiun sederhana berdasarkan input usia dan penghasilan."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Laporan Progress Kerja", prompt_template = "Tulis laporan progress kerja harian/mingguan berdasarkan input kegiatan."},
+  {category = "Fitur Khusus & Lainnya", title = "Buat Naskah Debat", prompt_template = "Buat naskah debat singkat untuk topik [Sebutkan topik]."},
+  {category = "Fitur Khusus & Lainnya", title = "Tulis Perencanaan Keuangan Keluarga", prompt_template = "Buat perencanaan keuangan keluarga berdasarkan input anggaran."},
+}
 
-                local respCode = conn.getResponseCode()
-                if respCode == 301 or respCode == 302 or respCode == 303 or respCode == 307 or respCode == 308 then
-                    local redirectUrl = conn.getHeaderField("Location")
-                    conn.disconnect()
-                    url = URL(redirectUrl)
-                    conn = url.openConnection()
-                    conn.setRequestMethod("GET")
-                    conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                    conn.setConnectTimeout(20000)
-                    conn.setReadTimeout(60000)
-                    respCode = conn.getResponseCode()
-                end
-                if respCode >= 400 then
-                    error("Server menjawab kode " .. tostring(respCode) .. " untuk " .. urlD)
-                end
-
-                local downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                if not downloadDir.exists() then downloadDir.mkdirs() end
-
-                local fileFinalPath = ""
-                local isStream = conn.getInputStream()
-
-                if isZipArtifact then
-                    local zis = ZipInputStream(isStream)
-                    local entry = zis.getNextEntry()
-                    local apkFound = false
-
-                    while entry ~= nil do
-                        local entryName = entry.getName()
-                        if entryName:lower():find("%.apk$") then
-                            local cleanApkName = entryName:match("[^/]+$") or "aplikasi.apk"
-                            local targetApkFile = File(downloadDir, cleanApkName)
-                            local fos = FileOutputStream(targetApkFile)
-                            local buf = String(string.rep(" ", 8192)).getBytes()
-                            local len = zis.read(buf)
-                            while len ~= -1 do
-                                fos.write(buf, 0, len)
-                                len = zis.read(buf)
-                            end
-                            fos.flush()
-                            fos.close()
-                            fileFinalPath = targetApkFile.getAbsolutePath()
-                            apkFound = true
-                            break
-                        end
-                        entry = zis.getNextEntry()
-                    end
-                    zis.close()
-                    isStream.close()
-                    conn.disconnect()
-
-                    if not apkFound then
-                        error("Artefak yang dipilih bukan berkas aplikasi. Tunggu pembangunan APK selesai.")
-                    end
-                else
-                    local fileTarget = File(downloadDir, namaFileSimpan)
-                    local fos = FileOutputStream(fileTarget)
-                    local buffer = String(string.rep(" ", 8192)).getBytes()
-                    local bytesRead = isStream.read(buffer)
-
-                    while bytesRead ~= -1 do
-                        fos.write(buffer, 0, bytesRead)
-                        bytesRead = isStream.read(buffer)
-                    end
-
-                    fos.flush()
-                    fos.close()
-                    isStream.close()
-                    conn.disconnect()
-                    fileFinalPath = fileTarget.getAbsolutePath()
-                end
-
-                return fileFinalPath
-            end
-
-            local ok, err = pcall(function() return ambil(urlDownload, tokenAuth, octet) end)
-            if not ok and urlCadangan and urlCadangan ~= "" then
-                local ok2, err2 = pcall(function() return ambil(urlCadangan, nil, false) end)
-                if ok2 then
-                    ok, err = true, err2
-                else
-                    err = tostring(err) .. "\n\nPercobaan cadangan:\n" .. tostring(err2)
-                end
-            end
-
-            mainHandler.post(Runnable{
-                run = function()
-                    pcall(function() progress.dismiss() end)
-                    if ok then
-                        local jalurApk = tostring(err)
-                        if service.speak then service.speak("Unduhan selesai. APK tersimpan di folder Download.") end
-                        PembuatAPK.dialogTombol("APK Berhasil Disimpan",
-                            "Berkas APK berhasil diunduh ke folder Download:\n\n" .. jalurApk, {
-                            {"pasang APK sekarang", function()
-                                local okPasang = pcall(function()
-                                    local f = File(jalurApk)
-                                    local intent = Intent(Intent.ACTION_VIEW)
-                                    intent.setDataAndType(Uri.fromFile(f), "application/vnd.android.package-archive")
-                                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    service.startActivity(intent)
-                                end)
-                                if not okPasang then
-                                    Toast.makeText(service, "Tidak bisa membuka pemasang langsung. Membuka folder Download, pilih berkas APK di sana.", Toast.LENGTH_LONG).show()
-                                    pcall(function()
-                                        local i = Intent("android.intent.action.VIEW_DOWNLOADS")
-                                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        service.startActivity(i)
-                                    end)
-                                end
-                            end},
-                            {"buka folder Download", function()
-                                pcall(function()
-                                    local i = Intent("android.intent.action.VIEW_DOWNLOADS")
-                                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    service.startActivity(i)
-                                end)
-                            end},
-                            {"salin lokasi berkas", function() salinKeClipboard("Lokasi APK", jalurApk) end, tetap = true},
-                        }, {"tutup", kembali})
-                    else
-                        PembuatAPK.tampilError("Gagal Mengunduh APK",
-                            "Berkas: " .. namaFileSimpan .. "\n\nKesalahan:\n" .. tostring(err),
-                            kembali,
-                            {{"buka di browser", function() bukaBrowser(urlCadangan or urlDownload) end}})
-                    end
-                end
-            })
-        end
-    }).start()
+local function getUniqueCategories()
+  local cats = {}
+  for _, feat in ipairs(AI_FEATURES) do
+    cats[feat.category] = true
+  end
+  local sorted = {}
+  for name in pairs(cats) do table.insert(sorted, name) end
+  table.sort(sorted)
+  return sorted
 end
 
-function PembuatAPK.ambilAPK(fullName, token, kb)
-    local kembali = tetapkanKembali(fullName, token, kb)
-    local endpointRelease = "https://api.github.com/repos/" .. fullName .. "/releases/latest"
-    kirimPermintaanGitHub("GET", endpointRelease, token, nil, function(okRel, resRel)
-        if okRel then
-            local r = JSONObject(resRel)
-            local aset = r.optJSONArray("assets")
-            if aset ~= nil and aset.length() > 0 then
-                local targetAset = nil
-                for i = 0, aset.length() - 1 do
-                    local it = aset.getJSONObject(i)
-                    local nm = it.optString("name", ""):lower()
-                    if nm:find("%.apk$") then
-                        targetAset = it
-                        break
-                    end
-                end
-                if not targetAset then targetAset = aset.getJSONObject(0) end
+-- ================ FUNGSI UTAMA PEMROSESAN TEKS ================
+local function processText(userInput, callback)
+  if not userInput or userInput == "" then return end
 
-                local nama = targetAset.optString("name", "aplikasi.apk")
-                local ukuran = targetAset.optLong("size", 0)
-                local tautan = targetAset.optString("browser_download_url", "")
-                local urlApi = targetAset.optString("url", "")
-                if urlApi == "" then urlApi = tautan end
-                local tag = r.optString("tag_name", "")
-                local tglRilis = r.optString("published_at", "")
-                local urlRilis = r.optString("html_url", "https://github.com/" .. fullName .. "/releases")
+  local originalCallback = callback
+  local function wrappedCallback(hasil)
+    if getBool("use_memory_mode") then
+      addChatMemory(userInput, hasil)
+    end
+    originalCallback(hasil)
+  end
+  callback = wrappedCallback
 
-                local pesan = "Proyek: " .. fullName
-                if tag ~= "" then pesan = pesan .. "\nVersi rilis: " .. tag end
-                pesan = pesan .. "\nNama berkas: " .. nama .. "\nUkuran: " .. formatUkuranBerkas(ukuran)
-                if tglRilis ~= "" then pesan = pesan .. "\nDirilis: " .. tglRilis end
-                pesan = pesan .. "\n\nTekan Unduh APK untuk menyimpan berkas langsung ke folder Download HP Anda."
-                if service.speak then service.speak("APK siap diunduh. " .. nama) end
-
-                PembuatAPK.dialogTombol("APK Siap Diunduh", pesan, {
-                    {"unduh APK", function()
-                        unduhLangsungKeFolderDownload(urlApi, nama, token, false, kembali, true, tautan)
-                    end},
-                    {"salin tautan unduhan", function() salinKeClipboard("Tautan APK", tautan) end, tetap = true},
-                    {"cek status pembangunan", function() PembuatAPK.cekStatus(fullName, token, kembali) end},
-                    {"buka halaman rilis di web", function() bukaBrowser(urlRilis) end},
-                }, {"kembali", kembali})
-                return
-            end
-        end
-
-        local endpointArt = "https://api.github.com/repos/" .. fullName .. "/actions/artifacts?per_page=20"
-        kirimPermintaanGitHub("GET", endpointArt, token, nil, function(okArt, resArt)
-            if okArt then
-                local objArt = JSONObject(resArt)
-                local arrArt = objArt.optJSONArray("artifacts")
-                if arrArt ~= nil and arrArt.length() > 0 then
-                    local daftarNama = {}
-                    local daftarData = {}
-
-                    for i = 0, arrArt.length() - 1 do
-                        local item = arrArt.getJSONObject(i)
-                        local artName = item.optString("name", "")
-                        local artSize = item.optLong("size_in_bytes", 0)
-                        table.insert(daftarNama, (i + 1) .. ". " .. artName .. " (" .. formatUkuranBerkas(artSize) .. ")")
-                        table.insert(daftarData, item)
-                    end
-
-                    local bPilihArt = AlertDialog.Builder(service)
-                    bPilihArt.setTitle("Pilih Berkas Artefak (" .. #daftarData .. ")")
-                    bPilihArt.setItems(daftarNama, DialogInterface.OnClickListener{
-                        onClick = function(dArt, whichArt)
-                            local terpilih = daftarData[whichArt + 1]
-                            local artNama = terpilih.optString("name", "aplikasi-apk")
-                            local artUrl = terpilih.optString("archive_download_url", "")
-
-                            PembuatAPK.dialogTombol("Unduh & Ekstrak APK",
-                                "Berkas: " .. artNama .. "\n\nTekan Unduh APK untuk mengunduh dan otomatis mengekstrak berkas .apk ke folder Download HP Anda.",
-                                {
-                                    {"unduh APK", function()
-                                        unduhLangsungKeFolderDownload(artUrl, artNama, token, true, function() PembuatAPK.ambilAPK(fullName, token, kembali) end)
-                                    end},
-                                    {"salin tautan", function() salinKeClipboard("Tautan Artefak", artUrl) end, tetap = true},
-                                }, {"kembali", function() PembuatAPK.ambilAPK(fullName, token, kembali) end})
-                        end
-                    })
-                    bPilihArt.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                        onClick = function() kembali() end
-                    })
-                    local dPArt = bPilihArt.create()
-                    dPArt.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                    dPArt.show()
-                    aturTombolHurufKecil(dPArt, nil, "kembali", nil)
-                    if service.speak then service.speak("Ditemukan " .. #daftarData .. " berkas artefak. Silakan pilih.") end
-                    return
-                end
-            end
-
-            local tombolBelum = {
-                {"cek status pembangunan", function() PembuatAPK.cekStatus(fullName, token, kembali) end},
-                {"buka actions di web", function() bukaBrowser("https://github.com/" .. fullName .. "/actions") end},
-            }
-            if not okArt then
-                PembuatAPK.tampilError("Gagal mengambil APK",
-                    "Proyek: " .. fullName .. "\n\nRilis: " .. tostring(resRel) .. "\nArtefak: " .. tostring(resArt),
-                    kembali, tombolBelum)
-            else
-                PembuatAPK.dialogTombol("APK Belum Siap",
-                    "Belum ada APK di rilis maupun artefak repo ini. Pembangunan mungkin belum selesai atau belum pernah dijalankan. Silakan cek status pembangunan.",
-                    tombolBelum, {"kembali", kembali})
-            end
-        end)
-    end)
-end
-
-function PembuatAPK.pastikanWorkflow(fullName, token, kembali, lanjut, idAwal)
-    local jalur = ".github/workflows/" .. NAMA_ALUR_KERJA
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. jalur
-    local slug = buatSlug(fullName:match("[^/]+$") or "aplikasi")
-    if slug == "" then slug = "aplikasi" end
-    local isiBaru = isiTemplat(TEMPLAT.workflowLengkap, {NAMA_APK = slug})
-
-    local function tulisWorkflow(shaLama, pesanCommit, sudahAda)
-        local payload = JSONObject()
-        payload.put("message", pesanCommit)
-        payload.put("content", Base64.encodeToString(String(isiBaru).getBytes("UTF-8"), Base64.NO_WRAP))
-        if shaLama then payload.put("sha", shaLama) end
-        kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(ok2, res2)
-            if ok2 then
-                -- true = workflow baru ditulis (push memicu build otomatis)
-                lanjut(true)
-            else
-                local info = "Proyek: " .. fullName .. "\n\n" .. tostring(res2)
-                if tostring(res2):lower():find("workflow") then
-                    info = info .. "\n\nToken GitHub perlu izin workflow. Buat token baru dengan izin repo dan workflow."
-                end
-                PembuatAPK.tampilError("Gagal memasang/memperbarui alur kerja", info, kembali)
-            end
-        end)
+  local function terapkanSemuaGaya(teks)
+    -- Kamus pengganti kata
+    if getBool("use_kamus") then
+      local s, data = pcall(cjson.decode, getPref("kamus_json", "{}"))
+      if s and type(data) == "table" then 
+        for k, v in pairs(data) do
+          -- Trim untuk menghindari spasi tersembunyi
+          local kataAsli = tostring(k):match("^%s*(.-)%s*$")
+          local kataGanti = tostring(v)
+          if kataAsli and kataAsli ~= "" then
+            local kEsc = kataAsli:gsub("([^%w])", "%%%1")
+            -- Ganti kata asli (lowercase)
+            teks = teks:gsub("%f[%a]"..kEsc.."%f[%A]", kataGanti)
+            -- Ganti jika kata asli diawali huruf kapital
+            local kKapital = kataAsli:sub(1,1):upper()..kataAsli:sub(2)
+            local kKapitalEsc = kKapital:gsub("([^%w])", "%%%1")
+            teks = teks:gsub("%f[%a]"..kKapitalEsc.."%f[%A]", kataGanti)
+          end
+        end 
+      end
     end
 
-    kirimPermintaanGitHub("GET", endpoint, token, nil, function(ada, res)
-        if ada then
-            -- Selalu timpa workflow lama dengan template terbaru (perbaikan ekstrak ZIP dll.)
-            local shaLama = nil
-            pcall(function()
-                shaLama = JSONObject(res).optString("sha", "")
-                if shaLama == "" then shaLama = nil end
-            end)
-            if not shaLama then
-                PembuatAPK.tampilError("Gagal membaca alur kerja lama",
-                    "Proyek: " .. fullName .. "\n\nTidak bisa mengambil SHA berkas workflow.", kembali)
-                return
-            end
-            if service.speak then service.speak("Memperbarui alur kerja APK.") end
-            tulisWorkflow(shaLama, "Perbarui alur kerja bangun APK (perbaikan ekstrak ZIP)", true)
-            return
+    teks = applySingkatan(teks)
+    teks = applyGaya(teks)
+    if getBool("use_brutal_punc") then
+      teks = teks:gsub("%?", "???"):gsub("%!", "!!!")
+      if not teks:match("[%?%.%!]$") then teks = teks .. "!!!" end
+    end
+    local modeAkhir = getPref("akhir_kalimat_mode", "Tidak Ada")
+    if modeAkhir == "Garis Baru" then teks = teks .. "\n"
+    elseif modeAkhir == "Spasi" then teks = teks .. " "
+    elseif modeAkhir == "Custom" then
+      local customTeks = getPref("akhir_kalimat_custom", "")
+      if customTeks ~= "" then teks = teks .. customTeks end
+    end
+    if getBool("use_no_space") then teks = teks:gsub("%s+", "") end
+    return teks
+  end
+
+  local function eksekusiAI(textToProcess)
+    -- ... (isi eksekusiAI sama seperti sebelumnya, tidak diubah)
+    -- Karena panjang, saya tidak mengubahnya di sini.
+    -- Namun pastikan tidak ada error. Kode ini sudah stabil.
+    local inputAman = tostring(textToProcess or "")
+    local gayaAktif = getBool("use_ai_style")
+    local selectedFeatureIndex = tonumber(getPref("ai_feature_index", "0")) or 0
+    local customAktif = getBool("use_custom_instr")
+    local customPrompt = getPref("active_custom_prompt", "")
+    local ghostAktif = getBool("use_ghost_mode")
+    local stylePrompt = ""
+    
+    if gayaAktif then
+      if selectedFeatureIndex > 0 and selectedFeatureIndex <= #AI_FEATURES then
+        local feature = AI_FEATURES[selectedFeatureIndex]
+        stylePrompt = "Tugas: " .. feature.prompt_template
+      else
+        local gayaBicara = getPref("gaya_bicara_ai", "Anak Jaksel")
+        if gayaBicara == "Anak Jaksel" then
+          stylePrompt = "STYLE: Natural South Jakarta casual conversation style (Anak Jaksel). Mix a few natural English words (e.g. 'literally', 'basically', 'which is', 'prefer') ONLY if it fits naturally in standard everyday chat. Do NOT force awkward English words."
+        elseif gayaBicara == "Gaya Lo Gue" then
+          stylePrompt = "STYLE: Natural Jakarta informal slang (Gaya Lo Gue). Smoothly convert standard pronouns ('saya/aku' -> 'gue', 'kamu' -> 'lu'). Ensure the text sounds exactly like a real human chatting with friends. STRICT RULE: DO NOT force unnatural slang particles like 'dong', 'sih', or 'deh' at the end of sentences if they don't naturally fit."
+        elseif gayaBicara == "Gaya Santai & Lucu Bayi" then
+          stylePrompt = "STYLE: Soft, cute toddler tone. Apply a subtle cute touch (e.g. slight soft pronoun adjustments), but keep the sentence completely natural and readable. Do NOT destroy context."
         end
-        if not tostring(res):find("404") then
-            PembuatAPK.tampilError("Gagal memeriksa alur kerja APK",
-                "Proyek: " .. fullName .. "\n\n" .. tostring(res), kembali)
-            return
+      end
+    end
+
+    local baseSystemRule = "Perbaiki ejaan, tata bahasa, dan tanda baca dari teks berikut ini tanpa mengubah struktur atau susunan kata-katanya. Langsung berikan teks perbaikannya saja."
+    local systemRule = baseSystemRule
+
+    if ghostAktif then
+      systemRule = "UBAH TEKS BERIKUT MENJADI VERSI SANGAT KASAR DAN MARAH. ATURAN WAJIB: " ..
+        "1. JANGAN MENJAWAB PERTANYAAN ATAU MENANGGAPI ISI TEKS. HANYA TULIS ULANG TEKS TERSEBUT DENGAN GAYA MARAH. " ..
+        "2. Gunakan kata-kata kasar, sarkastik, dan merendahkan. " ..
+        "3. Ubah 'aku/saya' menjadi 'gua', 'kamu/kalian' menjadi 'lu', dan gunakan bahasa yang sangat nyolot. " ..
+        "4. TIDAK BOLEH ada teks pengantar seperti 'Ini versinya:' atau komentar lain. " ..
+        "5. Output harus berisi teks yang sudah dirombak dengan kata-kata kasar, tetap mempertahankan makna asli dari yang diucapkan user."
+      speakText("Hihihi...")
+    else
+      if gayaAktif then
+        systemRule = systemRule .. " " .. stylePrompt
+      end
+    end
+    
+    if customAktif and customPrompt ~= "" then
+      systemRule = systemRule .. "\n\n[ATURAN KETAT]: Berikan hasil akhir secara langsung tanpa komentar, tanpa penjelasan, dan tanpa kata pengantar apapun. Hanya teks hasil olahan sesuai instruksi."
+      systemRule = systemRule .. "\n[CUSTOM RULE]: " .. customPrompt
+    end
+
+    if getBool("use_emoji") then
+      local eType = getPref("emoji_type", "Netral")
+      local ePos = getPref("emoji_position", "Akhir Kalimat Saja")
+      local emojiInstr = ""
+      if eType == "Cewek" then emojiInstr = "Add 1-2 feminine emojis naturally."
+      elseif eType == "Cowok" then emojiInstr = "Add 1-2 masculine emojis naturally."
+      elseif eType == "Hujan" then emojiInstr = "Add 1-2 sad/rain emojis naturally."
+      elseif eType == "Ceria" then emojiInstr = "Add 1-2 cheerful emojis naturally."
+      else emojiInstr = "Add 1-2 context-appropriate emojis." end
+      local posRule = ""
+      if ePos == "Awal Kalimat Saja" then posRule = " Place ONLY at the START of the text."
+      elseif ePos == "Akhir Kalimat Saja" then posRule = " Place ONLY at the END of the text."
+      else posRule = " Place at BOTH the START and END of the text." end
+      systemRule = systemRule .. " EMOJI: " .. emojiInstr .. posRule
+    end
+
+    local historyText = ""
+    if getBool("use_memory_mode") then
+      local sHist, hist = pcall(cjson.decode, getPref("chat_history_smart", "[]"))
+      if sHist and type(hist) == "table" and #hist > 0 then
+        historyText = "\n\n[KONTEKS PERCAKAPAN SEBELUMNYA]:\n"
+        for i = math.max(1, #hist - 2), #hist do
+          historyText = historyText .. "User: " .. hist[i].user .. "\nAI: " .. hist[i].ai .. "\n"
         end
-        -- Belum ada workflow
-        PembuatAPK.dialogTombol("Alur kerja APK belum ada",
-            "Repo ini belum memiliki berkas " .. jalur .. " yang membangun APK.\n\nSyarat: isi repo adalah proyek Android Gradle dengan modul bernama app (app/build.gradle).\n\nTekan tombol di bawah untuk memasang alur kerja, lalu GitHub akan membangun APK otomatis.",
-            {
-                {"pasang alur kerja dan bangun APK", function()
-                    tulisWorkflow(nil, "Pasang alur kerja bangun APK", false)
-                end},
-            }, {"batal", kembali})
-    end, true)
-end
+      end
+    end
 
+    local userContent = historyText .. "\n" .. inputAman
+    local fullPrompt = systemRule .. "\n\nINPUT TEXT TO PROCESS: " .. userContent .. "\n\nOUTPUT:"
 
-function PembuatAPK.bangunUlang(fullName, token, kb)
-    local kembali = tetapkanKembali(fullName, token, kb)
-    dialogPilihTandaTangan(fullName, token, kembali, function(pakaiCustom)
-    PembuatAPK.ambilIdRunTerakhir(fullName, token, function(idAwal)
-        PembuatAPK.pastikanWorkflow(fullName, token, kembali, function(baruDipasang)
-            if baruDipasang then
-                -- Memasang alur kerja sudah memicu pembangunan otomatis (push), cukup dipantau.
-                PembuatAPK.pantau(fullName, token, kembali, idAwal)
-                return
-            end
-            kirimPermintaanGitHub("GET", "https://api.github.com/repos/" .. fullName, token, nil, function(ok, res)
-                if not ok then
-                    PembuatAPK.tampilError("Gagal membaca proyek",
-                        "Proyek: " .. fullName .. "\n\n" .. tostring(res), kembali,
-                        {{"coba lagi", function() PembuatAPK.bangunUlang(fullName, token, kembali) end}})
-                    return
-                end
-                local cabang = JSONObject(res).optString("default_branch", "main")
-                local payload = JSONObject()
-                payload.put("ref", cabang)
-                local endpoint = "https://api.github.com/repos/" .. fullName .. "/actions/workflows/" .. NAMA_ALUR_KERJA .. "/dispatches"
-                kirimPermintaanGitHub("POST", endpoint, token, payload.toString(), function(ok2, res2)
-                    if ok2 then
-                        if service.speak then service.speak("Pembangunan APK dimulai.") end
-                        PembuatAPK.pantau(fullName, token, kembali, idAwal)
-                    else
-                        local info = "Proyek: " .. fullName .. "\nCabang: " .. cabang .. "\n\n" .. tostring(res2)
-                        if tostring(res2):find("workflow_dispatch") then
-                            info = info .. "\n\nAlur kerja di repo ini belum memiliki pemicu workflow_dispatch, sehingga tidak bisa dijalankan manual."
-                        end
-                        PembuatAPK.tampilError("Gagal memulai pembangunan APK", info, kembali,
-                            {{"coba lagi", function() PembuatAPK.bangunUlang(fullName, token, kembali) end}})
-                    end
-                end)
-            end)
-        end, idAwal)
-    end)
-    end)
-end
+    local function handleAIResult(out)
+      if not out or out == "" then return end
+      local clean = out:gsub("^%s*(.-)%s*$", "%1"):gsub('^"(.*)"$', "%1")
+      clean = clean:gsub("^%*%*.-%*%*%s*", "")
+      clean = clean:gsub("^Berikut.-:%s*", "")
+      callback(terapkanSemuaGaya(clean))
+      vibrate(60)
+    end
 
-function PembuatAPK.kelolaBerkas(fullName,token)
-    kirimPermintaanGitHub("GET","https://api.github.com/repos/"..fullName,token,nil,function(ok,res)
-        if not ok then
-            Toast.makeText(service,"Gagal membaca proyek: "..tostring(res),Toast.LENGTH_LONG).show()
-            return
+    local provider = getPref("active_provider", "Gemini")
+    if provider == "Gemini" then
+      local apiKey = getPref("gemini_api_key", ""):gsub("%s+", "")
+      local model = getPref("gemini_model", "gemini-1.5-flash"):gsub("^models/", "")
+      local payload = { contents = { { parts = { { text = fullPrompt } } } }, generationConfig = { temperature = 0.2 } }
+      Http.post("https://generativelanguage.googleapis.com/v1beta/models/"..model..":generateContent?key="..apiKey, cjson.encode(payload), {["Content-Type"]="application/json"}, function(c, content)
+        if c == 200 then 
+          local s, res = pcall(cjson.decode, content) 
+          if s and res and res.candidates and res.candidates[1] and res.candidates[1].content and res.candidates[1].content.parts and res.candidates[1].content.parts[1] then 
+            handleAIResult(res.candidates[1].content.parts[1].text) 
+          end 
+        else
+          pesan("Gagal akses Gemini! Kode status: " .. tostring(c))
         end
-        bukaDirektoriRepoDialog(fullName,"",token,JSONObject(res))
-    end)
-end
-
-function PembuatAPK.bukaArtifact(fullName, token)
-    local url = "https://github.com/" .. fullName .. "/actions"
-    tampilDialog("Artifact dan hasil build",
-        "Buka halaman Actions untuk melihat APK, AAB, mapping, laporan, dan hasil pengujian yang disimpan oleh workflow.",
-        {"buka Actions", function() bukaBrowser(url) end},
-        {"salin tautan", function() salinKeClipboard("Tautan Actions", url) end},
-        {"kembali", function() PembuatAPK.menuAplikasi(fullName, token) end})
-end
-
-PembuatAPK.bukaPengaturanWorkflow = function(fullName, token)
-    local url = "https://github.com/" .. fullName .. "/actions/workflows/" .. NAMA_ALUR_KERJA
-    tampilDialog("Pengaturan workflow",
-        "Di halaman ini Anda dapat melihat riwayat workflow, menjalankan workflow manual, membatalkan proses, dan membuka log setiap langkah.",
-        {"buka workflow", function() bukaBrowser(url) end}, nil,
-        {"kembali", function() PembuatAPK.menuAplikasi(fullName, token) end})
-end
-
-function PembuatAPK.hapusProyekGitHub(fullName,token)
-    tampilDialog("Hapus proyek APK?",
-        "PERINGATAN: tindakan ini menghapus repositori proyek dari GitHub secara permanen. APK dan riwayat pembangunan di repositori tersebut juga ikut hilang.",
-        {"hapus permanen",function()
-            kirimPermintaanGitHub("DELETE","https://api.github.com/repos/"..fullName,token,nil,function(ok,res)
-                if ok then
-                    local daftar=ambilDaftarAplikasi(); local baru={}
-                    for _,n in ipairs(daftar) do if n~=fullName then table.insert(baru,n) end end
-                    simpanDaftarAplikasi(baru)
-                    Toast.makeText(service,"Proyek berhasil dihapus dari GitHub.",Toast.LENGTH_LONG).show()
-                    PembuatAPK.daftar(token)
-                else
-                    Toast.makeText(service,"Gagal menghapus proyek: "..tostring(res),Toast.LENGTH_LONG).show()
-                end
-            end)
-        end},nil,
-        {"batalkan",function() PembuatAPK.menuAplikasi(fullName,token) end})
-end
-
-function PembuatAPK.editMainActivity(fullName, token)
-    local progress = ProgressDialog(service)
-    progress.setTitle("Mencari berkas utama")
-    progress.setMessage("Sedang memeriksa berkas proyek...")
-    progress.setCancelable(false)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-
-    kirimPermintaanGitHub("GET", "https://api.github.com/repos/" .. fullName, token, nil, function(okRepo, resRepo)
-        if not okRepo then
-            pcall(function() progress.dismiss() end)
-            Toast.makeText(service, "Gagal membaca repositori: " .. tostring(resRepo), Toast.LENGTH_LONG).show()
-            PembuatAPK.menuAplikasi(fullName, token)
-            return
+      end)
+    elseif provider == "Groq" then
+      local apiKey = getPref("groq_api_key", ""):gsub("%s+", "")
+      Http.post("https://api.groq.com/openai/v1/chat/completions", cjson.encode({model=getPref("groq_model", "llama-3.3-70b-versatile"), messages={{role="system", content=systemRule},{role="user", content=userContent}}, temperature=0.2}), {["Content-Type"]="application/json", ["Authorization"]="Bearer "..apiKey}, function(c, content)
+        if c == 200 then 
+          local s, res = pcall(cjson.decode, content) 
+          if s and res and res.choices and res.choices[1] and res.choices[1].message then 
+            handleAIResult(res.choices[1].message.content) 
+          end 
         end
+      end)
+    elseif provider == "ChatGPT Gratis" then
+      local url = "https://soffiapis.my.id/api/ai/gpt-free"
+      local payload = cjson.encode({q = fullPrompt})
+      Http.post(url, payload, {["Content-Type"]="application/json"}, function(c, content)
+        if c == 200 then
+          local s, res = pcall(cjson.decode, content)
+          if s and res and res.data and res.data.reply then handleAIResult(res.data.reply) else handleAIResult(content) end
+        else pesan("Gagal akses ChatGPT Gratis: " .. c) end
+      end)
+    end
+  end
 
-        local defBranch = JSONObject(resRepo).optString("default_branch", "main")
-        local endpointTree = "https://api.github.com/repos/" .. fullName .. "/git/trees/" .. defBranch .. "?recursive=1"
-
-        kirimPermintaanGitHub("GET", endpointTree, token, nil, function(okTree, resTree)
-            if not okTree then
-                pcall(function() progress.dismiss() end)
-                Toast.makeText(service, "Gagal memeriksa daftar berkas: " .. tostring(resTree), Toast.LENGTH_LONG).show()
-                PembuatAPK.menuAplikasi(fullName, token)
-                return
-            end
-
-            local mainPath = nil
-            pcall(function()
-                local treeObj = JSONObject(resTree)
-                local treeArr = treeObj.optJSONArray("tree")
-                if treeArr ~= nil then
-                    for i = 0, treeArr.length() - 1 do
-                        local item = treeArr.getJSONObject(i)
-                        local p = item.optString("path", "")
-                        if p:match("MainActivity%.java$") or p:match("MainActivity%.kt$") then
-                            mainPath = p
-                            break
-                        end
-                    end
-                end
-            end)
-
-            if not mainPath then
-                pcall(function() progress.dismiss() end)
-                if service.speak then service.speak("Berkas MainActivity tidak ditemukan.") end
-                Toast.makeText(service, "Berkas MainActivity.java atau .kt tidak ditemukan di proyek ini.", Toast.LENGTH_LONG).show()
-                PembuatAPK.menuAplikasi(fullName, token)
-                return
-            end
-
-            pcall(function() progress.setMessage("Membuka " .. (mainPath:match("[^/]+$") or mainPath) .. "...") end)
-
-            local endpointContent = "https://api.github.com/repos/" .. fullName .. "/contents/" .. mainPath
-            kirimPermintaanGitHub("GET", endpointContent, token, nil, function(okContent, resContent)
-                pcall(function() progress.dismiss() end)
-                if not okContent then
-                    Toast.makeText(service, "Gagal mengambil berkas: " .. tostring(resContent), Toast.LENGTH_LONG).show()
-                    PembuatAPK.menuAplikasi(fullName, token)
-                    return
-                end
-
-                local obj = JSONObject(resContent)
-                local sha = obj.optString("sha", "")
-                local base64Content = obj.optString("content", ""):gsub("%s+", "")
-                local bytes = Base64.decode(base64Content, Base64.DEFAULT)
-                local isiTeks = String(bytes, "UTF-8")
-
-                if service.speak then service.speak("Membuka editor " .. (mainPath:match("[^/]+$") or "MainActivity")) end
-
-                formEditIsiBerkas(fullName, mainPath, sha, isiTeks, token, function()
-                    PembuatAPK.menuAplikasi(fullName, token)
-                end, function()
-                    PembuatAPK.menuAplikasi(fullName, token)
-                end)
-            end, true)
-        end, true)
-    end, true)
+  if getBool("use_translate") then
+    if getBool("use_ai_translate") then
+      local targetLangName = getPref("translate_lang", "English")
+      local targetLangCode = "en"
+      local locales = Locale.getAvailableLocales()
+      for i=0, #locales-1 do if locales[i].getDisplayName() == targetLangName then targetLangCode = locales[i].getLanguage() if targetLangCode == "zh" then targetLangCode = "zh-CN" end break end end
+      local aiTranslatePrompt = "Translate the following text into "..targetLangName.." naturally, preserving the exact meaning and tone. Output ONLY the translated text."
+      local fullPromptTranslate = aiTranslatePrompt .. "\n\nTEXT: " .. userInput .. "\n\nTRANSLATION:"
+      local function handleAIResultTranslate(out)
+        if not out or out == "" then return end
+        local clean = out:gsub("^%s*(.-)%s*$", "%1"):gsub('^"(.*)"$', "%1")
+        callback(terapkanSemuaGaya(clean))
+        vibrate(60)
+      end
+      local provider = getPref("active_provider", "Gemini")
+      if provider == "Gemini" then
+        local apiKey = getPref("gemini_api_key", ""):gsub("%s+", "")
+        local model = getPref("gemini_model", "gemini-1.5-flash"):gsub("^models/", "")
+        local payload = { contents = { { parts = { { text = fullPromptTranslate } } } }, generationConfig = { temperature = 0.2 } }
+        Http.post("https://generativelanguage.googleapis.com/v1beta/models/"..model..":generateContent?key="..apiKey, cjson.encode(payload), {["Content-Type"]="application/json"}, function(c, content)
+          if c == 200 then 
+            local s, res = pcall(cjson.decode, content) 
+            if s and res and res.candidates and res.candidates[1] and res.candidates[1].content and res.candidates[1].content.parts and res.candidates[1].content.parts[1] then 
+              handleAIResultTranslate(res.candidates[1].content.parts[1].text) 
+            end 
+          end
+        end)
+      elseif provider == "Groq" then
+        local apiKey = getPref("groq_api_key", ""):gsub("%s+", "")
+        Http.post("https://api.groq.com/openai/v1/chat/completions", cjson.encode({model=getPref("groq_model", "llama-3.3-70b-versatile"), messages={{role="user", content=fullPromptTranslate}}, temperature=0.2}), {["Content-Type"]="application/json", ["Authorization"]="Bearer "..apiKey}, function(c, content)
+          if c == 200 then 
+            local s, res = pcall(cjson.decode, content) 
+            if s and res and res.choices and res.choices[1] and res.choices[1].message then 
+              handleAIResultTranslate(res.choices[1].message.content) 
+            end 
+          end
+        end)
+      elseif provider == "ChatGPT Gratis" then
+        local url = "https://soffiapis.my.id/api/ai/gpt-free"
+        local payload = cjson.encode({q = fullPromptTranslate})
+        Http.post(url, payload, {["Content-Type"]="application/json"}, function(c, content)
+          if c == 200 then
+            local s, res = pcall(cjson.decode, content)
+            if s and res and res.data and res.data.reply then handleAIResultTranslate(res.data.reply) else handleAIResultTranslate(content) end
+          end
+        end)
+      end
+    else
+      local toLang = "en"
+      local targetLangName = getPref("translate_lang", "English")
+      local locales = Locale.getAvailableLocales()
+      for i=0, #locales-1 do if locales[i].getDisplayName() == targetLangName then toLang = locales[i].getLanguage() if toLang == "zh" then toLang = "zh-CN" end break end end
+      local postBody = "client=gtx&sl=auto&tl="..toLang.."&dt=t&q="..Uri.encode(userInput)
+      Http.post("https://translate.googleapis.com/translate_a/single", postBody, {["User-Agent"]="Mozilla/5.0", ["Content-Type"]="application/x-www-form-urlencoded"}, function(code, content)
+        if code == 200 then 
+          local s, res = pcall(cjson.decode, content) 
+          if s and res and res[1] then 
+            local hasilTr = "" 
+            for i=1, #res[1] do if res[1][i][1] then hasilTr = hasilTr .. res[1][i][1] end end 
+            callback(terapkanSemuaGaya(hasilTr)) 
+            vibrate(60) 
+          end 
+        end
+      end)
+    end
+  else
+    if getBool("use_ai_process") then eksekusiAI(userInput) else callback(terapkanSemuaGaya(userInput)) end
+  end
 end
 
-PembuatAPK.menuAplikasi = function(fullName, token)
-    local item={
-        "1. Periksa status pembangunan",
-        "2. Unduh APK/AAB Release",
-        "3. Mulai pembangunan APK",
-        "4. Edit berkas MainActivity.java",
-        "5. Lihat Artifact dan laporan",
-        "6. Lihat workflow dan log",
-        "7. Kelola berkas proyek",
-        "8. Buka proyek di GitHub",
-        "9. Hapus dari daftar aplikasi",
-        "10. Hapus proyek dari GitHub"
-    }
-    local b=AlertDialog.Builder(service); b.setTitle("Kelola aplikasi\n"..fullName)
-    b.setItems(item,DialogInterface.OnClickListener{onClick=function(_,which)
-        if which==0 then PembuatAPK.cekStatus(fullName,token)
-        elseif which==1 then PembuatAPK.ambilAPK(fullName,token)
-        elseif which==2 then PembuatAPK.bangunUlang(fullName,token)
-        elseif which==3 then PembuatAPK.editMainActivity(fullName,token)
-        elseif which==4 then PembuatAPK.bukaArtifact(fullName,token)
-        elseif which==5 then PembuatAPK.bukaPengaturanWorkflow(fullName,token)
-        elseif which==6 then PembuatAPK.kelolaBerkas(fullName,token)
-        elseif which==7 then bukaBrowser("https://github.com/"..fullName)
-        elseif which==8 then
-            local daftar=ambilDaftarAplikasi(); local baru={}
-            for _,n in ipairs(daftar) do if n~=fullName then table.insert(baru,n) end end
-            simpanDaftarAplikasi(baru); Toast.makeText(service,"Dihapus dari daftar aplikasi. Proyek GitHub tetap ada.",Toast.LENGTH_LONG).show(); PembuatAPK.daftar(token)
-        elseif which==9 then PembuatAPK.hapusProyekGitHub(fullName,token) end
+function addChatMemory(userText, aiText)
+  local maxEntries = 30
+  local s, hist = pcall(cjson.decode, getPref("chat_history_smart", "[]"))
+  if not s or type(hist) ~= "table" then hist = {} end
+  table.insert(hist, {user = userText, ai = aiText, time = os.date("%H:%M")})
+  if #hist > maxEntries then
+    table.remove(hist, 1)
+  end
+  setPref("chat_history_smart", cjson.encode(hist))
+end
+
+local function showChatHistory()
+  local s, hist = pcall(cjson.decode, getPref("chat_history_smart", "[]"))
+  if not s or type(hist) ~= "table" then hist = {} end
+
+  local scroll = ScrollView(service)
+  local layHist = LinearLayout(service).setOrientation(1).setPadding(30,30,30,30)
+  scroll.addView(layHist)
+
+  if #hist == 0 then
+    layHist.addView(TextView(service).setText("Belum ada riwayat chat.").setTextSize(16))
+  else
+    for i, entry in ipairs(hist) do
+      local card = LinearLayout(service).setOrientation(1).setPadding(10,10,10,10)
+      card.setBackgroundColor(0xFFF0F0F0)
+      local tvUser = TextView(service).setText("🧑 Anda ("..entry.time.."): " .. entry.user).setTextSize(16).setTextColor(0xFF000000)
+      local tvAI = TextView(service).setText("🤖 AI: " .. entry.ai).setTextSize(16).setTextColor(0xFF333333)
+      card.addView(tvUser)
+      card.addView(tvAI)
+      layHist.addView(card)
+      layHist.addView(TextView(service).setText("--------------------------------"))
+    end
+  end
+
+  local btnClear = Button(service).setText("Hapus Semua Riwayat")
+  btnClear.setOnClickListener(function()
+    local d = LuaDialog(service)
+    d.setTitle("Konfirmasi")
+    d.setMessage("Hapus semua riwayat chat?")
+    d.setPositiveButton("Ya", {onClick=function()
+      setPref("chat_history_smart", "[]")
+      pesan("Riwayat chat dihapus!")
+      d.dismiss()
+      showChatHistory()
     end})
-    b.setNegativeButton("kembali",DialogInterface.OnClickListener{onClick=function() PembuatAPK.daftar(token) end})
-    local d=b.create(); d.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY); d.show(); aturTombolHurufKecil(d,nil,"kembali",nil)
+    d.setNegativeButton("Batal", nil)
+    d.show()
+  end)
+  layHist.addView(btnClear)
+
+  local dlg = LuaDialog(service)
+  dlg.setTitle("Riwayat Chat")
+  dlg.setView(scroll)
+  dlg.setPositiveButton("Tutup", nil)
+  dlg.show()
 end
 
-function PembuatAPK.daftar(token)
-    local daftar=ambilDaftarAplikasi()
-    if #daftar==0 then
-        tampilDialog("Aplikasi saya","Belum ada proyek aplikasi.",
-            {"buat aplikasi baru",function() PembuatAPK.formAplikasiBaru(token) end},nil,
-            {"kembali",function() PembuatAPK.menu(token) end})
-        return
+local function showPengaturanGayaVokal()
+  local layV = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+  layV.addView(TextView(service).setText("Pilih Vokal:"))
+  local cbAIUEO = CheckBox(service).setText("Gunakan Vokal AIUEO")
+  local cbA = CheckBox(service).setText("Gunakan Vokal A saja")
+  local cbI = CheckBox(service).setText("Gunakan Vokal I")
+  local cbCadel = CheckBox(service).setText("Gunakan Gaya Cadel")
+  layV.addView(cbAIUEO) layV.addView(cbA) layV.addView(cbI) layV.addView(cbCadel)
+  local vokalCharSet = getPref("vokal_char_set", "AIUEO")
+  if vokalCharSet == "AIUEO" then cbAIUEO.setChecked(true)
+  elseif vokalCharSet == "A" then cbA.setChecked(true)
+  elseif vokalCharSet == "I" then cbI.setChecked(true)
+  elseif vokalCharSet == "Cadel C" then cbCadel.setChecked(true) end
+  local function updateVokalSelection(mode)
+    cbAIUEO.setChecked(mode == "AIUEO") cbA.setChecked(mode == "A") cbI.setChecked(mode == "I") cbCadel.setChecked(mode == "Cadel C")
+    setPref("vokal_char_set", mode)
+  end
+  cbAIUEO.setOnCheckedChangeListener{onCheckedChanged=function(v, c) if c then updateVokalSelection("AIUEO") end end}
+  cbA.setOnCheckedChangeListener{onCheckedChanged=function(v, c) if c then updateVokalSelection("A") end end}
+  cbI.setOnCheckedChangeListener{onCheckedChanged=function(v, c) if c then updateVokalSelection("I") end end}
+  cbCadel.setOnCheckedChangeListener{onCheckedChanged=function(v, c) if c then updateVokalSelection("Cadel C") end end}
+  if not cbAIUEO.isChecked() and not cbA.isChecked() and not cbI.isChecked() and not cbCadel.isChecked() then updateVokalSelection("AIUEO") end
+  layV.addView(TextView(service).setText("\nJumlah Pengulangan:"))
+  local etV = EditText(service).setText(getPref("vokal_count", "2")).setInputType(2)
+  layV.addView(etV)
+  local dlg = LuaDialog(service)
+  dlg.setTitle("Pengaturan Gaya Vokal")
+  dlg.setView(layV)
+  dlg.setPositiveButton("Tutup", {onClick=function()
+    local count = tonumber(etV.getText().toString())
+    if count and count >= 1 then setPref("vokal_count", tostring(count)) pesan("Disimpan sementara!") else pesan("Jumlah pengulangan harus angka dan minimal 1.") end
+  end})
+  dlg.show()
+end
+
+-- ==================== MENU UTAMA ====================
+function showMain()
+  initTempPrefs()  -- reset tempPrefsData setiap kali menu utama dibuka
+  local root = ScrollView(service)
+  local lay = LinearLayout(service).setOrientation(1).setPadding(30,20,30,30)
+  root.addView(lay)
+  local function addBtn(t, cb) local b = Button(service).setText(t) b.setOnClickListener(cb) lay.addView(b) return b end
+  local mainDialog
+
+  addBtn("Fitur AI", function()
+    local layAI = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+    local chkGaya = CheckBox(service).setText("Aktifkan Gaya Bicara AI").setChecked(getBool("use_ai_style"))
+    chkGaya.setOnCheckedChangeListener{onCheckedChanged=function(v, c) setBool("use_ai_style", c) end}
+    layAI.addView(chkGaya)
+    
+    local btnGaya = Button(service).setText("Pilih Gaya/Kategori: " .. getPref("ai_feature_title", "Belum dipilih"))
+    btnGaya.setOnClickListener(function()
+      local cats = getUniqueCategories()
+      local layCat = LinearLayout(service).setOrientation(1).setPadding(20,20,20,20)
+      local listCat = ListView(service)
+      local adapterCat = ArrayAdapter(service, android.R.layout.simple_list_item_1, cats)
+      listCat.setAdapter(adapterCat)
+      layCat.addView(listCat)
+      local dlgCat = LuaDialog(service)
+      dlgCat.setTitle("Pilih Kategori Gaya")
+      dlgCat.setView(layCat)
+      listCat.setOnItemClickListener{onItemClick=function(parent, view, pos, id)
+        local selectedCat = cats[pos+1]
+        local features = {}
+        for idx, feat in ipairs(AI_FEATURES) do
+          if feat.category == selectedCat then
+            table.insert(features, {title=feat.title, index=idx})
+          end
+        end
+        local featureTitles = {}
+        for _, f in ipairs(features) do table.insert(featureTitles, f.title) end
+        dlgCat.dismiss()
+        local layFeat = LinearLayout(service).setOrientation(1).setPadding(20,20,20,20)
+        local listFeat = ListView(service)
+        local adapterFeat = ArrayAdapter(service, android.R.layout.simple_list_item_1, featureTitles)
+        listFeat.setAdapter(adapterFeat)
+        layFeat.addView(listFeat)
+        local dlgFeat = LuaDialog(service)
+        dlgFeat.setTitle(selectedCat)
+        dlgFeat.setView(layFeat)
+        listFeat.setOnItemClickListener{onItemClick=function(parent2, view2, pos2, id2)
+          local selectedFeature = features[pos2+1]
+          setPref("ai_feature_index", tostring(selectedFeature.index))
+          setPref("ai_feature_title", selectedFeature.title)
+          btnGaya.setText("Pilih Gaya/Kategori: " .. selectedFeature.title)
+          pesan("Gaya dipilih: " .. selectedFeature.title)
+          dlgFeat.dismiss()
+        end}
+        dlgFeat.setNegativeButton("Kembali", {onClick=function(d2) d2.dismiss() end})
+        dlgFeat.show()
+      end}
+      dlgCat.setNegativeButton("Tutup", {onClick=function(d) d.dismiss() end})
+      dlgCat.show()
+    end)
+    layAI.addView(btnGaya)
+
+    local providerList = {"Gemini", "Groq", "ChatGPT Gratis"}
+    local spinProv = Spinner(service).setAdapter(ArrayAdapter(service, android.R.layout.simple_spinner_dropdown_item, providerList))
+    local currentProv = getPref("active_provider", "Gemini")
+    for i, v in ipairs(providerList) do if v == currentProv then spinProv.setSelection(i-1) break end end
+    layAI.addView(TextView(service).setText("\nProvider:"))
+    layAI.addView(spinProv)
+
+    local layApi = LinearLayout(service).setOrientation(1)
+    local etApiKey = EditText(service).setHint("Masukkan API Key")
+    local btnAmbilModel = Button(service).setText("Ambil Daftar Model")
+    local btnGetKey = Button(service).setText("Dapatkan Kunci API")
+    local spinModel = Spinner(service)
+    local function updateModelList()
+      local p = providerList[spinProv.getSelectedItemPosition()+1]
+      local s, models = pcall(cjson.decode, getPref(p:lower().."_models_list", "[]"))
+      if not s or type(models) ~= "table" then models = {} end
+      spinModel.setAdapter(ArrayAdapter(service, android.R.layout.simple_spinner_dropdown_item, models))
+      local curModel = getPref(p:lower().."_model", "")
+      for i, m in ipairs(models) do if m == curModel then spinModel.setSelection(i-1) break end end
     end
-    local b=AlertDialog.Builder(service); b.setTitle("Aplikasi saya")
-    b.setItems(daftar,DialogInterface.OnClickListener{onClick=function(dialog,which) PembuatAPK.menuAplikasi(daftar[which+1],token) end})
-    b.setNegativeButton("kembali",DialogInterface.OnClickListener{onClick=function() PembuatAPK.menu(token) end})
-    local diag=b.create(); diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY); diag.show()
-    aturTombolHurufKecil(diag,nil,"kembali",nil)
-end
-
-PembuatAPK.menu = function(token)
-    local items={
-        "1. Buat aplikasi APK Android lengkap",
-        "2. Aplikasi saya",
-        "3. Mulai build ulang",
-        "4. Lihat status build",
-        "5. Unduh APK/AAB dan artifact",
-        "6. Panduan signing dan GitHub Secrets",
-        "7. Panduan fitur GitHub Actions"
-    }
-    local b=AlertDialog.Builder(service); b.setTitle("Pusat Pembuatan APK Android")
-    b.setItems(items,DialogInterface.OnClickListener{onClick=function(_,which)
-        if which==0 then PembuatAPK.formAplikasiBaru(token)
-        elseif which==1 then PembuatAPK.daftar(token)
-        elseif which==2 then PembuatAPK.daftar(token)
-        elseif which==3 then PembuatAPK.daftar(token)
-        elseif which==4 then PembuatAPK.daftar(token)
-        elseif which==5 then
-            tampilDialog("Signing Release","Untuk signing Release yang aman, simpan keystore sebagai GitHub Secret KEYSTORE_BASE64 dan password sebagai KEYSTORE_PASSWORD, KEY_ALIAS, serta KEY_PASSWORD. Jangan memasukkan password ke source code.",
-                {"buka secrets",function() bukaBrowser("https://github.com/settings/repositories") end},nil,{"kembali",function() PembuatAPK.menu(token) end})
-        elseif which==6 then
-            tampilDialog("Fitur GitHub Actions","Workflow dapat menjalankan beberapa job, matrix build, pemeriksaan Lint, Unit Test, instrumentation test, cache, artifact, release, dan attestation.",
-                {"mengerti",function() PembuatAPK.menu(token) end})
-        end
-    end})
-    b.setNegativeButton("kembali",DialogInterface.OnClickListener{onClick=function() menuUtama() end})
-    local d=b.create(); d.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY); d.show(); aturTombolHurufKecil(d,nil,"kembali",nil)
-end
-
-
-
-
-
-unduhTandaTanganSaatIni = function(repoObj, token, kembali)
-    local fullName = repoObj.optString("full_name", "")
-    local progress = ProgressDialog(service)
-    progress.setTitle("Mengunduh tanda tangan")
-    progress.setMessage("Mencari keystore di repositori...")
-    progress.setCancelable(true)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-    if service.speak then service.speak("Mencari tanda tangan di repositori.") end
-
-    kirimPermintaanGitHub("GET", "https://api.github.com/repos/" .. fullName, token, nil, function(okRepo, resRepo)
-        if not okRepo then
-            pcall(function() progress.dismiss() end)
-            Toast.makeText(service, "Gagal membaca repo: " .. tostring(resRepo), Toast.LENGTH_LONG).show()
-            if kembali then kembali() end
-            return
-        end
-        local branch = "main"
-        pcall(function() branch = JSONObject(resRepo).optString("default_branch", "main") end)
-        local endpointTree = "https://api.github.com/repos/" .. fullName .. "/git/trees/" .. branch .. "?recursive=1"
-        kirimPermintaanGitHub("GET", endpointTree, token, nil, function(okTree, resTree)
-            if not okTree then
-                pcall(function() progress.dismiss() end)
-                Toast.makeText(service, "Gagal memindai berkas: " .. tostring(resTree), Toast.LENGTH_LONG).show()
-                if kembali then kembali() end
-                return
-            end
-
-            local prioritas, lainnya = {}, {}
-            pcall(function()
-                local treeArr = JSONObject(resTree).optJSONArray("tree")
-                if treeArr ~= nil then
-                    for i = 0, treeArr.length() - 1 do
-                        local it = treeArr.getJSONObject(i)
-                        if it.optString("type", "") == "blob" then
-                            local p = it.optString("path", "")
-                            local lower = p:lower()
-                            if lower:find("%.jks$") or lower:find("%.keystore$") or lower:find("%.pkcs12$") or lower:find("%.p12$") then
-                                if lower:find("^signing/") then
-                                    table.insert(prioritas, p)
-                                else
-                                    table.insert(lainnya, p)
-                                end
-                            end
-                        end
-                    end
-                end
-            end)
-
-            local daftar = {}
-            for _, p in ipairs(prioritas) do table.insert(daftar, p) end
-            for _, p in ipairs(lainnya) do table.insert(daftar, p) end
-
-            pcall(function() progress.dismiss() end)
-
-            if #daftar == 0 then
-                if service.speak then service.speak("Tanda tangan tidak ditemukan.") end
-                local d = AlertDialog.Builder(service)
-                d.setTitle("Tanda tangan tidak ada")
-                d.setMessage("Tidak ditemukan berkas keystore (.jks / .keystore / .pkcs12) di repositori ini.\n\nLetakkan keystore di folder signing/ repo, lalu coba lagi.")
-                d.setPositiveButton("kembali", DialogInterface.OnClickListener{
-                    onClick = function() if kembali then kembali() end end
-                })
-                local diag = d.create()
-                diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                diag.show()
-                aturTombolHurufKecil(diag, "kembali", nil, nil)
-                return
-            end
-
-            -- Otomatis unduh yang pertama (prioritas folder signing/)
-            local target = daftar[1]
-            if service.speak then service.speak("Mengunduh " .. target) end
-            Toast.makeText(service, "Mengunduh: " .. target, Toast.LENGTH_SHORT).show()
-            unduhKeystoreKeDownload(fullName, target, token, function()
-                if kembali then kembali() end
-            end)
-        end, true)
-    end, true)
-end
-
-menuTandaTangan = function(repoObj, token)
-    local items = {
-        "1. Buat tanda tangan baru",
-        "2. Cari & unduh keystore dari repo",
-        "3. Unggah keystore dari HP ke repo",
-        "4. Petunjuk tanda tangan APK"
-    }
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Tanda tangan aplikasi")
-    b.setMessage("Buat atau pilih keystore agar update APK tidak bentrok.")
-    b.setItems(items, DialogInterface.OnClickListener{
-        onClick = function(_, which)
-            if which == 0 then
-                buatTandaTanganBaru(repoObj, token)
-            elseif which == 1 then
-                cariUnduhKeystore(repoObj, token)
-            elseif which == 2 then
-                pilihKeystoreDariHp(repoObj, token, Environment.getExternalStorageDirectory().getAbsolutePath())
-            elseif which == 3 then
-                local d = AlertDialog.Builder(service)
-                d.setTitle("Petunjuk tanda tangan")
-                d.setMessage("1. Buat tanda tangan baru (atau unggah keystore lama).\n2. Saat bangun APK, pilih Gunakan tanda tangan custom.\n3. Update APK berikutnya harus memakai keystore yang sama.\n4. Simpan password dengan aman.")
-                d.setPositiveButton("mengerti", DialogInterface.OnClickListener{
-                    onClick = function() menuTandaTangan(repoObj, token) end
-                })
-                local diag = d.create()
-                diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                diag.show()
-                aturTombolHurufKecil(diag, "mengerti", nil, nil)
-            end
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() kelolaRepoPilihanDialog(repoObj, token) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-buatTandaTanganBaru = function(repoObj, token)
-    -- Langkah 1: pilih jenis keystore (tanpa Spinner, agar pasti tampil)
-    local b0 = AlertDialog.Builder(service)
-    b0.setTitle("Buat tanda tangan baru")
-    b0.setMessage("Pilih jenis berkas tanda tangan:")
-    b0.setItems({"JKS (.jks) — umum di Android", "PKCS12 (.pkcs12) — format modern"}, DialogInterface.OnClickListener{
-        onClick = function(_, whichTipe)
-            local storeType = (whichTipe == 1) and "PKCS12" or "JKS"
-            local ekstensi = (whichTipe == 1) and ".pkcs12" or ".jks"
-            buatTandaTanganBaruForm(repoObj, token, storeType, ekstensi)
-        end
-    })
-    b0.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() menuTandaTangan(repoObj, token) end
-    })
-    local d0 = b0.create()
-    d0.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    d0.show()
-    aturTombolHurufKecil(d0, nil, "kembali", nil)
-end
-
-buatTandaTanganBaruForm = function(repoObj, token, storeType, ekstensi)
-    local fullName = repoObj.optString("full_name", "")
-    local MATCH = LinearLayout.LayoutParams.MATCH_PARENT
-    local WRAP = LinearLayout.LayoutParams.WRAP_CONTENT
-
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local function lab(teks)
-        local v = TextView(service)
-        v.setText(teks)
-        v.setPadding(0, 16, 0, 4)
-        layout.addView(v, LinearLayout.LayoutParams(MATCH, WRAP))
-        return v
+    local function loadApiKey()
+      local p = providerList[spinProv.getSelectedItemPosition()+1]
+      if p == "ChatGPT Gratis" then etApiKey.setText("") else etApiKey.setText(getPref(p:lower().."_api_key", "")) end
     end
+    local function setApiVisibility()
+      local p = providerList[spinProv.getSelectedItemPosition()+1]
+      if p == "ChatGPT Gratis" then
+        layApi.setVisibility(View.GONE)
+      else
+        layApi.setVisibility(View.VISIBLE)
+        loadApiKey()
+        updateModelList()
+      end
+    end
+    layApi.addView(etApiKey)
+    layApi.addView(btnAmbilModel)
+    layApi.addView(btnGetKey)
+    layApi.addView(TextView(service).setText("Model:"))
+    layApi.addView(spinModel)
+    layAI.addView(layApi)
+    setApiVisibility()
 
-    local function kotak(hint, isiAwal)
-        local e = EditText(service)
-        e.setHint(hint)
-        if isiAwal ~= nil and tostring(isiAwal) ~= "" then
-            e.setText(tostring(isiAwal))
-        end
-        e.setSingleLine(true)
-        e.setFocusable(true)
-        e.setFocusableInTouchMode(true)
-        layout.addView(e, LinearLayout.LayoutParams(MATCH, WRAP))
-        return e
+    spinProv.setOnItemSelectedListener(luajava.createProxy("android.widget.AdapterView$OnItemSelectedListener", {
+      onItemSelected = function(parent, view, pos, id) setApiVisibility() end,
+      onNothingSelected = function(parent) end
+    }))
+
+    btnAmbilModel.setOnClickListener(function()
+      local p = providerList[spinProv.getSelectedItemPosition()+1]
+      local apiKey = etApiKey.getText().toString():gsub("%s+", "")
+      if apiKey == "" then pesan("Isi API Key dulu!") return end
+      pesan("Mengambil model "..p.."...")
+      if p == "Gemini" then
+        Http.get("https://generativelanguage.googleapis.com/v1beta/models?key="..apiKey, function(c, content)
+          if c == 200 then
+            local s, res = pcall(cjson.decode, content)
+            if s and res and res.models then
+              local nm = {}
+              for _, m in pairs(res.models) do 
+                if m.name then 
+                  local mn = m.name:lower() 
+                  if mn:find("gemini") or mn:find("gemma") then 
+                    local namaBersih = m.name:gsub("^models/", "")
+                    table.insert(nm, namaBersih) 
+                  end 
+                end 
+              end
+              setPref("gemini_models_list", cjson.encode(nm)) 
+              updateModelList() 
+              pesan("Model Gemini diperbarui (" .. #nm .. " model)")
+            else
+              pesan("Respon dari Gemini tidak valid!")
+            end
+          else 
+            pesan("Gagal mengambil model! Kode HTTP: "..tostring(c)) 
+          end
+        end)
+      elseif p == "Groq" then
+        Http.get("https://api.groq.com/openai/v1/models", {["Authorization"]="Bearer "..apiKey}, function(c, content)
+          if c == 200 then
+            local s, res = pcall(cjson.decode, content)
+            if s and res and res.data then
+              local nm = {}
+              for _, m in ipairs(res.data) do table.insert(nm, m.id) end
+              setPref("groq_models_list", cjson.encode(nm)) updateModelList() pesan("Model Groq diperbarui")
+            end
+          else pesan("Gagal: "..c) end
+        end)
+      end
+    end)
+
+    btnGetKey.setOnClickListener(function()
+      local p = providerList[spinProv.getSelectedItemPosition()+1]
+      local url = ""
+      if p == "Gemini" then url = "https://aistudio.google.com/app/apikey"
+      elseif p == "Groq" then url = "https://console.groq.com/keys"
+      else return end
+      pesan("Membuka Google Chrome")
+      local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+      intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      service.startActivity(intent)
+    end)
+
+    local function simpanFiturAI()
+      local p = providerList[spinProv.getSelectedItemPosition()+1]
+      setPref("active_provider", p)
+      if p ~= "ChatGPT Gratis" then
+        setPref(p:lower().."_api_key", etApiKey.getText().toString():gsub("%s+", ""))
+        local selectedModel = tostring(spinModel.getSelectedItem())
+        if selectedModel and selectedModel ~= "" and selectedModel ~= "nil" then setPref(p:lower().."_model", selectedModel) end
+      end
+      pesan("Pengaturan AI disiapkan sementara!")
     end
 
-    lab("Jenis: " .. storeType .. " (tersimpan di folder signing/ repo)")
-    lab("Nama tanda tangan / nama berkas")
-    local inputNama = kotak("contoh: toko-release", "release")
+    local dlgAI = LuaDialog(service)
+    dlgAI.setTitle("Fitur AI")
+    dlgAI.setView(layAI)
+    dlgAI.setPositiveButton("Simpan", {onClick=function() simpanFiturAI() end})
+    dlgAI.setNegativeButton("Batal", nil)
+    dlgAI.show()
+  end)
 
-    lab("Alias (nama kunci pribadi)")
-    local inputAlias = kotak("contoh: appkey", prefs.getString(KEY_SIGN_ALIAS, "appkey"))
-
-    lab("Password keystore (minimal 6 karakter)")
-    local inputPass = kotak("ketik password", "")
-    pcall(function() inputPass.setInputType(0x00000081) end)
-
-    lab("Ulangi password keystore")
-    local inputPass2 = kotak("ketik ulang password", "")
-    pcall(function() inputPass2.setInputType(0x00000081) end)
-
-    lab("Password kunci (kosongkan jika sama)")
-    local inputKeyPass = kotak("opsional", "")
-    pcall(function() inputKeyPass.setInputType(0x00000081) end)
-
-    lab("Nama lengkap (CN)")
-    local inputCN = kotak("nama Anda atau nama aplikasi", "Android App")
-
-    lab("Organisasi (O)")
-    local inputOrg = kotak("nama organisasi", "Personal")
-
-    lab("Unit organisasi (OU)")
-    local inputOU = kotak("contoh: Mobile", "Mobile")
-
-    lab("Kota (L)")
-    local inputKota = kotak("contoh: Jakarta", "Jakarta")
-
-    lab("Provinsi (ST)")
-    local inputST = kotak("contoh: DKI", "DKI")
-
-    lab("Kode negara 2 huruf (C)")
-    local inputC = kotak("contoh: ID", "ID")
-
-    lab("Masa berlaku (tahun)")
-    local inputValid = kotak("contoh: 25", "25")
-
+  -- Terjemahan
+  addBtn("Terjemahan", function()
     local scroll = ScrollView(service)
-    scroll.setFillViewport(true)
-    scroll.addView(layout, LinearLayout.LayoutParams(MATCH, WRAP))
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Data tanda tangan")
-    b.setView(scroll)
-    b.setPositiveButton("buat tanda tangan", DialogInterface.OnClickListener{
-        onClick = function()
-            local function ambil(e)
-                return tostring(e.getText()):match("^%s*(.-)%s*$")
-            end
-            local namaDasar = ambil(inputNama)
-            local alias = ambil(inputAlias)
-            local pass = tostring(inputPass.getText())
-            local pass2 = tostring(inputPass2.getText())
-            local keyPass = tostring(inputKeyPass.getText())
-            local cn = ambil(inputCN)
-            local org = ambil(inputOrg)
-            local ou = ambil(inputOU)
-            local kota = ambil(inputKota)
-            local st = ambil(inputST)
-            local c = ambil(inputC)
-            local validTahun = tonumber(ambil(inputValid)) or 25
-
-            if namaDasar == "" then namaDasar = "release" end
-            namaDasar = namaDasar:gsub("[^%w%-%_]", "-")
-            local namaFile = namaDasar
-            local low = namaFile:lower()
-            if not (low:find("%.jks$") or low:find("%.pkcs12$") or low:find("%.p12$") or low:find("%.keystore$")) then
-                namaFile = namaFile .. ekstensi
-            end
-            if alias == "" then alias = "appkey" end
-            if cn == "" then cn = "Android App" end
-            if org == "" then org = "Personal" end
-            if ou == "" then ou = "Mobile" end
-            if kota == "" then kota = "Jakarta" end
-            if st == "" then st = "DKI" end
-            if c == "" then c = "ID" end
-            c = c:upper():sub(1, 2)
-            if keyPass == "" then keyPass = pass end
-            if validTahun < 1 then validTahun = 25 end
-            if validTahun > 100 then validTahun = 100 end
-            local validHari = tostring(validTahun * 365)
-
-            if #pass < 6 then
-                Toast.makeText(service, "Password minimal 6 karakter!", Toast.LENGTH_SHORT).show()
-                buatTandaTanganBaruForm(repoObj, token, storeType, ekstensi)
-                return
-            end
-            if pass ~= pass2 then
-                Toast.makeText(service, "Password tidak sama!", Toast.LENGTH_SHORT).show()
-                buatTandaTanganBaruForm(repoObj, token, storeType, ekstensi)
-                return
-            end
-
-            local function amanD(s)
-                return tostring(s):gsub('"', ""):gsub("'", ""):gsub("\\", ""):gsub(",", " ")
-            end
-            local dname = string.format("CN=%s, OU=%s, O=%s, L=%s, ST=%s, C=%s",
-                amanD(cn), amanD(ou), amanD(org), amanD(kota), amanD(st), amanD(c))
-
-            prefs.edit()
-                .putString(KEY_SIGN_ALIAS, alias)
-                .putString(KEY_SIGN_STORE_PASS, pass)
-                .putString(KEY_SIGN_KEY_PASS, keyPass)
-                .putString(KEY_SIGN_FILE, namaFile)
-                .apply()
-
-            local passEsc = pass:gsub("'", "'\\''")
-            local keyPassEsc = keyPass:gsub("'", "'\\''")
-            local dnameEsc = dname:gsub("'", "'\\''")
-
-            local wf = "name: Buat Keystore\n"
-                .. "on:\n"
-                .. "  workflow_dispatch:\n"
-                .. "jobs:\n"
-                .. "  buat:\n"
-                .. "    runs-on: ubuntu-latest\n"
-                .. "    permissions:\n"
-                .. "      contents: write\n"
-                .. "    steps:\n"
-                .. "      - uses: actions/checkout@v4\n"
-                .. "      - name: Generate keystore\n"
-                .. "        run: |\n"
-                .. "          mkdir -p signing\n"
-                .. "          keytool -genkeypair -v -storetype " .. storeType
-                .. " -keystore \"signing/" .. namaFile .. "\""
-                .. " -alias \"" .. alias .. "\""
-                .. " -keyalg RSA -keysize 2048 -validity " .. validHari
-                .. " -storepass '" .. passEsc .. "' -keypass '" .. keyPassEsc .. "'"
-                .. " -dname '" .. dnameEsc .. "'\n"
-                .. "          printf '%s\\n' \"storePassword=" .. pass .. "\" \"keyPassword=" .. keyPass .. "\" \"keyAlias=" .. alias .. "\" > signing/credentials.properties\n"
-                .. "      - name: Commit keystore ke repositori\n"
-                .. "        run: |\n"
-                .. "          git config user.name \"keystore-bot\"\n"
-                .. "          git config user.email \"keystore@users.noreply.github.com\"\n"
-                .. "          git add signing/\n"
-                .. "          git commit -m \"Tambah tanda tangan " .. namaFile .. "\" || echo \"Tidak ada perubahan\"\n"
-                .. "          git push\n"
-                .. "      - uses: actions/upload-artifact@v4\n"
-                .. "        with:\n"
-                .. "          name: keystore-tanda-tangan\n"
-                .. "          path: signing/\n"
-
-            local jalurWf = ".github/workflows/buat-keystore.yml"
-            local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. jalurWf
-
-            local function tulisDanJalankan(shaLama)
-                local payload = JSONObject()
-                payload.put("message", "Pasang alur buat keystore")
-                payload.put("content", Base64.encodeToString(String(wf).getBytes("UTF-8"), Base64.NO_WRAP))
-                if shaLama then payload.put("sha", shaLama) end
-                kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(ok, res)
-                    if not ok then
-                        Toast.makeText(service, "Gagal menulis workflow: " .. tostring(res), Toast.LENGTH_LONG).show()
-                        menuTandaTangan(repoObj, token)
-                        return
-                    end
-                    kirimPermintaanGitHub("GET", "https://api.github.com/repos/" .. fullName, token, nil, function(okR, resR)
-                        local cabang = "main"
-                        pcall(function() cabang = JSONObject(resR).optString("default_branch", "main") end)
-                        local body = JSONObject()
-                        body.put("ref", cabang)
-                        local ep = "https://api.github.com/repos/" .. fullName .. "/actions/workflows/buat-keystore.yml/dispatches"
-                        kirimPermintaanGitHub("POST", ep, token, body.toString(), function(okD, resD)
-                            if okD then
-                                if service.speak then service.speak("Pembuatan tanda tangan dimulai di repositori.") end
-                                local d = AlertDialog.Builder(service)
-                                d.setTitle("Tanda tangan sedang dibuat")
-                                d.setMessage("Berkas \"" .. namaFile .. "\" disimpan ke folder signing/ di repositori GitHub (bukan memori internal HP).\n\nTunggu sekitar 1 menit, lalu buka folder signing/ atau unduh keystore.")
-                                d.setPositiveButton("buka folder signing", DialogInterface.OnClickListener{
-                                    onClick = function() bukaDirektoriRepoDialog(fullName, "signing", token, repoObj) end
-                                })
-                                d.setNeutralButton("cari & unduh", DialogInterface.OnClickListener{
-                                    onClick = function() cariUnduhKeystore(repoObj, token) end
-                                })
-                                d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                                    onClick = function() menuTandaTangan(repoObj, token) end
-                                })
-                                local diag = d.create()
-                                diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                                diag.show()
-                                aturTombolHurufKecil(diag, "buka folder signing", "kembali", "cari & unduh")
-                            else
-                                Toast.makeText(service, "Workflow tersimpan. Jalankan manual di Actions: Buat Keystore.\n" .. tostring(resD), Toast.LENGTH_LONG).show()
-                                menuTandaTangan(repoObj, token)
-                            end
-                        end)
-                    end, true)
-                end)
-            end
-
-            kirimPermintaanGitHub("GET", endpoint, token, nil, function(ada, res)
-                local sha = nil
-                if ada then
-                    pcall(function() sha = JSONObject(res).optString("sha", "") end)
-                    if sha == "" then sha = nil end
-                end
-                tulisDanJalankan(sha)
-            end, true)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() buatTandaTanganBaru(repoObj, token) end
-    })
-
-    local okShow, errShow = pcall(function()
-        local diag = b.create()
-        diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        diag.setCanceledOnTouchOutside(false)
-        diag.show()
-        aturTombolHurufKecil(diag, "buat tanda tangan", "kembali", nil)
-        -- Fokus ke kotak pertama agar TalkBack / keyboard aktif
-        pcall(function() inputNama.requestFocus() end)
+    local layUtama = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+    scroll.addView(layUtama)
+    local cacheBahasa = getPref("daftar_bahasa_sinkron", "[]")
+    local s, DAFTAR_BAHASA = pcall(cjson.decode, cacheBahasa)
+    if not s or type(DAFTAR_BAHASA) ~= "table" or #DAFTAR_BAHASA == 0 then 
+      DAFTAR_BAHASA = {"Indonesia", "English", "Japanese", "Arabic", "Chinese"} 
+    end
+    layUtama.addView(TextView(service).setText("Pengaturan Terjemahan:").setTypeface(Typeface.DEFAULT_BOLD))
+    local swTrans = Switch(service).setText("Aktifkan Terjemahan").setChecked(getBool("use_translate"))
+    swTrans.setOnCheckedChangeListener{onCheckedChanged=function(v, c) setBool("use_translate", c) end}
+    layUtama.addView(swTrans)
+    local swAITrans = Switch(service).setText("Terjemahkan dengan AI").setChecked(getBool("use_ai_translate"))
+    swAITrans.setOnCheckedChangeListener{onCheckedChanged=function(v, c) setBool("use_ai_translate", c) end}
+    layUtama.addView(swAITrans)
+    local btnAsal, btnTujuan
+    local function showLanguagePicker(title, prefKey, targetButton, prefix)
+      local layCari = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+      local etSearch = EditText(service).setHint("Cari bahasa...")
+      local listV = ListView(service)
+      local listWithDetect = {"Deteksi Otomatis"}
+      for _, v in ipairs(DAFTAR_BAHASA) do table.insert(listWithDetect, v) end
+      local adapter = ArrayAdapter(service, android.R.layout.simple_list_item_1, listWithDetect)
+      listV.setAdapter(adapter)
+      etSearch.addTextChangedListener{onTextChanged=function(s) adapter.getFilter().filter(tostring(s)) end}
+      layCari.addView(etSearch) layCari.addView(listV)
+      local dl = LuaDialog(service)
+      dl.setTitle(title)
+      dl.setView(layCari)
+      dl.setNegativeButton("Batal", nil)
+      dl.show()
+      listV.setOnItemClickListener{onItemClick=function(parent, view, pos, id)
+        local selected = tostring(adapter.getItem(pos))
+        setPref(prefKey, selected)
+        targetButton.setText(prefix .. selected)
+        pesan("Dipilih: " .. selected)
+        dl.dismiss()
+      end}
+    end
+    layUtama.addView(TextView(service).setText("\nBahasa Asal:").setPadding(0,20,0,0))
+    btnAsal = Button(service).setText("Dari: " .. getPref("lang_asal_pilihan", "Deteksi Otomatis"))
+    btnAsal.setOnClickListener(function() showLanguagePicker("Pilih Bahasa Asal", "lang_asal_pilihan", btnAsal, "Dari: ") end)
+    layUtama.addView(btnAsal)
+    layUtama.addView(TextView(service).setText("\nBahasa Tujuan:").setPadding(0,20,0,0))
+    btnTujuan = Button(service).setText("Ke: " .. getPref("translate_lang", "English"))
+    btnTujuan.setOnClickListener(function() showLanguagePicker("Pilih Bahasa Tujuan", "translate_lang", btnTujuan, "Ke: ") end)
+    layUtama.addView(btnTujuan)
+    local btnUpdateLang = Button(service).setText("Update Bahasa dari Sistem")
+    btnUpdateLang.setOnClickListener(function()
+      vibrate(60)
+      local locales = Locale.getAvailableLocales()
+      local temp, seen = {}, {}
+      for i=0, #locales-1 do local name = locales[i].getDisplayName() if name ~= "" and not seen[name] then table.insert(temp, name) seen[name] = true end end
+      table.sort(temp)
+      setPref("daftar_bahasa_sinkron", cjson.encode(temp))
+      pesan("Berhasil sinkron " .. #temp .. " bahasa!")
     end)
-    if not okShow then
-        Toast.makeText(service, "Gagal menampilkan form: " .. tostring(errShow), Toast.LENGTH_LONG).show()
-        menuTandaTangan(repoObj, token)
-    end
-end
+    layUtama.addView(btnUpdateLang)
+    local dlgTr = LuaDialog(service)
+    dlgTr.setTitle("Terjemahan")
+    dlgTr.setView(scroll)
+    dlgTr.setPositiveButton("Tutup", nil)
+    dlgTr.show()
+  end)
 
-dialogPilihTandaTangan = function(fullName, token, kembali, lanjutBuild)
-    local alias = prefs.getString(KEY_SIGN_ALIAS, "")
-    local adaCustom = (alias ~= "")
-    local pesan = "Pilih jenis tanda tangan untuk APK ini.\n\nTanda tangan asli = debug (bawaan).\nTanda tangan custom = keystore yang sudah Anda buat/pilih."
-    if adaCustom then
-        pesan = pesan .. "\n\nCustom tersimpan: alias " .. alias
+  -- Pengaturan Emoji
+  addBtn("Pengaturan Emoji", function()
+    local layE = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+    local cbE = CheckBox(service).setText("Aktifkan Emoji").setChecked(getBool("use_emoji"))
+    layE.addView(cbE)
+    local jenisEmoji = {"Netral", "Cewek", "Cowok", "Hujan", "Ceria"}
+    local posisiEmoji = {"Awal Kalimat Saja", "Akhir Kalimat Saja", "Awal & Akhir Kalimat"}
+    local spJenis = Spinner(service).setAdapter(ArrayAdapter(service, android.R.layout.simple_spinner_dropdown_item, jenisEmoji))
+    local curJenis = getPref("emoji_type", "Netral")
+    for i, v in ipairs(jenisEmoji) do if v == curJenis then spJenis.setSelection(i-1) break end end
+    layE.addView(TextView(service).setText("Jenis Emoji:"))
+    layE.addView(spJenis)
+    local spPosisi = Spinner(service).setAdapter(ArrayAdapter(service, android.R.layout.simple_spinner_dropdown_item, posisiEmoji))
+    local curPosisi = getPref("emoji_position", "Akhir Kalimat Saja")
+    for i, v in ipairs(posisiEmoji) do if v == curPosisi then spPosisi.setSelection(i-1) break end end
+    layE.addView(TextView(service).setText("Posisi Emoji:"))
+    layE.addView(spPosisi)
+    local dlgEm = LuaDialog(service)
+    dlgEm.setTitle("Atur Emoji")
+    dlgEm.setView(layE)
+    dlgEm.setPositiveButton("Simpan", {onClick=function()
+      setBool("use_emoji", cbE.isChecked())
+      setPref("emoji_type", jenisEmoji[spJenis.getSelectedItemPosition()+1])
+      setPref("emoji_position", posisiEmoji[spPosisi.getSelectedItemPosition()+1])
+      pesan("Setelan Emoji disiapkan sementara!")
+    end})
+    dlgEm.setNegativeButton("Batal", nil)
+    dlgEm.show()
+  end)
+
+  -- Instruksi Custom
+  addBtn("Instruksi Custom", function()
+    local s, data = pcall(cjson.decode, getPref("custom_prompts", "[]"))
+    if not s or type(data) ~= "table" then data = {} end
+    local activeIdx = tonumber(getPref("active_prompt_idx", "-1"))
+    local isEnabled = getBool("use_custom_instr")
+
+    local layout = LinearLayout(service).setOrientation(1).setPadding(20,20,20,20)
+    local cbAktif = CheckBox(service).setText("Aktifkan Instruksi Custom").setChecked(isEnabled)
+    cbAktif.setOnCheckedChangeListener{onCheckedChanged=function(v, c) setBool("use_custom_instr", c) end}
+    layout.addView(cbAktif)
+
+    local function updateAdapterItems(adapterObj)
+      local newItems = {}
+      for i, v in ipairs(data) do
+        local prefix = (i-1 == activeIdx) and "✓ " or "   "
+        table.insert(newItems, prefix .. v.name)
+      end
+      adapterObj.clear()
+      for _, item in ipairs(newItems) do adapterObj.add(item) end
+      adapterObj.notifyDataSetChanged()
+    end
+
+    local items = {}
+    for i, v in ipairs(data) do
+      local prefix = (i-1 == activeIdx) and "✓ " or "   "
+      table.insert(items, prefix .. v.name)
+    end
+    local adapter = ArrayAdapter(service, android.R.layout.simple_list_item_1, items)
+    local listInstr = ListView(service)
+    listInstr.setAdapter(adapter)
+    layout.addView(listInstr)
+
+    local btnTambah = Button(service).setText("Tambah Baru")
+    btnTambah.setOnClickListener(function()
+      local layAdd = LinearLayout(service).setOrientation(1).setPadding(40,20,40,20)
+      local en = EditText(service).setHint("Nama Instruksi") local ep = EditText(service).setHint("Isi Instruksi...")
+      layAdd.addView(en) layAdd.addView(ep)
+      local dlgAdd = LuaDialog(service)
+      dlgAdd.setTitle("Tambah Instruksi")
+      dlgAdd.setView(layAdd)
+      dlgAdd.setPositiveButton("Simpan", {onClick=function()
+        local name, prompt = en.getText().toString(), ep.getText().toString()
+        if name ~= "" and prompt ~= "" then
+          table.insert(data, {name=name, text=prompt})
+          setPref("custom_prompts", cjson.encode(data))
+          activeIdx = #data - 1
+          setPref("active_prompt_idx", tostring(activeIdx))
+          setPref("active_custom_prompt", prompt)
+          pesan("Instruksi baru ditambahkan")
+          updateAdapterItems(adapter)
+          setBool("use_custom_instr", true)
+          cbAktif.setChecked(true)
+        end
+      end})
+      dlgAdd.setNegativeButton("Batal", nil)
+      dlgAdd.show()
+    end)
+    layout.addView(btnTambah)
+
+    listInstr.setOnItemClickListener{onItemClick=function(parent, view, pos, id)
+      if activeIdx == pos then
+        setPref("active_prompt_idx", "-1") setPref("active_custom_prompt", "")
+        activeIdx = -1
+        cbAktif.setChecked(false)
+        setBool("use_custom_instr", false)
+        pesan("Instruksi tidak terpilih")
+      else
+        setPref("active_prompt_idx", tostring(pos)) setPref("active_custom_prompt", data[pos+1].text)
+        activeIdx = pos
+        setBool("use_custom_instr", true)
+        cbAktif.setChecked(true)
+        pesan("Terpilih: " .. data[pos+1].name)
+      end
+      updateAdapterItems(adapter)
+    end}
+
+    listInstr.setOnItemLongClickListener{onItemLongClick=function(parent, view, pos, id)
+      local idx = pos + 1
+      local layOpt = LinearLayout(service).setOrientation(1).setPadding(40,20,40,20)
+      local tvInfo = TextView(service).setText("Instruksi: " .. data[idx].name).setTextSize(16)
+      layOpt.addView(tvInfo)
+      local btnEdit = Button(service).setText("Edit")
+      local btnHapus = Button(service).setText("Hapus")
+      layOpt.addView(btnEdit)
+      layOpt.addView(btnHapus)
+
+      local dlgOpt = LuaDialog(service)
+      dlgOpt.setTitle("Opsi Instruksi")
+      dlgOpt.setView(layOpt)
+      dlgOpt.setNegativeButton("Batal", {onClick=function(d) d.dismiss() end})
+      dlgOpt.show()
+
+      btnEdit.setOnClickListener(function()
+        dlgOpt.dismiss()
+        local layEdit = LinearLayout(service).setOrientation(1).setPadding(40,20,40,20)
+        local en = EditText(service).setText(data[idx].name) local ep = EditText(service).setText(data[idx].text)
+        layEdit.addView(en) layEdit.addView(ep)
+        local dlgEdit = LuaDialog(service)
+        dlgEdit.setTitle("Edit Instruksi")
+        dlgEdit.setView(layEdit)
+        dlgEdit.setPositiveButton("Simpan", {onClick=function()
+          data[idx] = {name=en.getText().toString(), text=ep.getText().toString()} setPref("custom_prompts", cjson.encode(data))
+          if activeIdx == idx-1 then setPref("active_custom_prompt", data[idx].text) end
+          updateAdapterItems(adapter)
+          commitPrefs()
+          dlgEdit.dismiss()
+        end})
+        dlgEdit.setNegativeButton("Batal", {onClick=function(d) d.dismiss() end})
+        dlgEdit.show()
+      end)
+
+      btnHapus.setOnClickListener(function()
+        dlgOpt.dismiss()
+        table.remove(data, idx) setPref("custom_prompts", cjson.encode(data))
+        if activeIdx == idx-1 then setPref("active_prompt_idx", "-1") setPref("active_custom_prompt", "") activeIdx = -1 end
+        updateAdapterItems(adapter)
+        commitPrefs()
+        pesan("Instruksi dihapus")
+      end)
+      return true
+    end}
+
+    local dlgIns = LuaDialog(service)
+    dlgIns.setTitle("Instruksi Custom")
+    dlgIns.setView(layout)
+    dlgIns.setPositiveButton("Tutup", nil)
+    dlgIns.show()
+  end)
+
+  -- Pengaturan Lanjutan
+  addBtn("Pengaturan Lanjutan", function()
+    local scroll = ScrollView(service)
+    local layFitur = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+    scroll.addView(layFitur)
+    local function addSwDialog(txt, key)
+      local sw = Switch(service).setText(txt).setChecked(getBool(key))
+      sw.setOnCheckedChangeListener{onCheckedChanged=function(v, c) setBool(key, c) end}
+      layFitur.addView(sw)
+    end
+    layFitur.addView(TextView(service).setText("Pemrosesan Teks:").setTypeface(Typeface.DEFAULT_BOLD))
+    local swModeAI = Switch(service).setText(getBool("use_ai_process") and "Mode AI (Online)" or "Mode Offline")
+    swModeAI.setChecked(getBool("use_ai_process"))
+    swModeAI.setOnCheckedChangeListener{onCheckedChanged=function(v, c)
+      setBool("use_ai_process", c)
+      swModeAI.setText(c and "Mode AI (Online)" or "Mode Offline")
+      pesan(c and "Mode AI diaktifkan" or "Mode Offline diaktifkan")
+    end}
+    layFitur.addView(swModeAI)
+    addSwDialog("Mode Revisi Teks Terdahulu", "use_revision_mode")
+    addSwDialog("Dikte Berkelanjutan", "use_continuous_mode")
+    
+    local layTTS = LinearLayout(service).setOrientation(0).setGravity(Gravity.CENTER_VERTICAL)
+    local swTTS = Switch(service).setText("Baca Hasil Suara (TTS)").setChecked(getBool("use_auto_tts"))
+    swTTS.setOnCheckedChangeListener{onCheckedChanged=function(v, c) setBool("use_auto_tts", c) end}
+    local btnSetTTS = Button(service).setText("Atur")
+    btnSetTTS.setOnClickListener(function() showPengaturanTTS() end)
+    layTTS.addView(swTTS, LinearLayout.LayoutParams(0, -2, 1.0))
+    layTTS.addView(btnSetTTS)
+    layFitur.addView(layTTS)
+
+    local layG = LinearLayout(service).setOrientation(1)
+    local swGetar = Switch(service).setText("Fitur Getaran").setChecked(getBool("use_vibration"))
+    local laySlider = LinearLayout(service).setOrientation(1).setPadding(20,10,20,10)
+    local txtValue = TextView(service)
+    local skGetar = SeekBar(service).setMax(500)
+    local curDur = tonumber(getPref("vibration_duration", "50"))
+    skGetar.setProgress(curDur) txtValue.setText("Durasi Getar: " .. curDur .. " ms")
+    skGetar.setOnSeekBarChangeListener{onProgressChanged=function(bar, prog)
+      if prog < 10 then prog = 10 end
+      txtValue.setText("Durasi Getar: " .. prog .. " ms") setPref("vibration_duration", tostring(prog))
+      local v = service.getSystemService(Context.VIBRATOR_SERVICE) if v then v.vibrate(prog) end
+    end}
+    laySlider.addView(txtValue) laySlider.addView(skGetar)
+    laySlider.setVisibility(getBool("use_vibration") and View.VISIBLE or View.GONE)
+    swGetar.setOnCheckedChangeListener{onCheckedChanged=function(v, c)
+      setBool("use_vibration", c) laySlider.setVisibility(c and View.VISIBLE or View.GONE) if c then vibrate() end
+    end}
+    layG.addView(swGetar) layG.addView(laySlider) layFitur.addView(layG)
+    addSwDialog("Mode Tanpa Spasi", "use_no_space")
+    addSwDialog("Mode Singkatan Nomor", "use_singkatan")
+    addSwDialog("Tanda Baca Brutal", "use_brutal_punc")
+    addSwDialog("Tampilkan Konfirmasi Saat Klik", "use_confirmation")
+    addSwDialog("Aktifkan Mode Hantu", "use_ghost_mode")
+
+    layFitur.addView(TextView(service).setText("\nMemori Cerdas:").setPadding(10,15,10,5))
+    addSwDialog("Aktifkan Mode Ingatan", "use_memory_mode")
+    local layMemori = LinearLayout(service).setOrientation(0)
+    local btnRiwayat = Button(service).setText("Riwayat Chat")
+    btnRiwayat.setOnClickListener(function()
+      showChatHistory()
+    end)
+    layMemori.addView(btnRiwayat)
+    layFitur.addView(layMemori)
+
+    layFitur.addView(TextView(service).setText("\nPengaturan Gaya Vokal:").setPadding(10,15,10,5))
+    local layVokal = LinearLayout(service).setOrientation(0).setGravity(Gravity.CENTER_VERTICAL)
+    local swVokal = Switch(service).setText("Aktifkan Gaya Vokal").setChecked(getBool("use_gaya_vokal"))
+    swVokal.setOnCheckedChangeListener{onCheckedChanged=function(v, c) setBool("use_gaya_vokal", c) end}
+    local btnSetVokal = Button(service).setText("Atur") btnSetVokal.setOnClickListener(function() showPengaturanGayaVokal() end)
+    layVokal.addView(swVokal, LinearLayout.LayoutParams(0, -2, 1.0)) layVokal.addView(btnSetVokal) layFitur.addView(layVokal)
+    local dlgAdv = LuaDialog(service)
+    dlgAdv.setTitle("Pengaturan Lanjutan")
+    dlgAdv.setView(scroll)
+    dlgAdv.setPositiveButton("Selesai", nil)
+    dlgAdv.show()
+  end)
+
+  -- Kamus Pribadi
+  addBtn("Kamus Pribadi", function()
+    local layK = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+    local cbK = CheckBox(service).setText("Aktifkan Kamus").setChecked(getBool("use_kamus"))
+    layK.addView(cbK)
+
+    local btnKAdd = Button(service).setText("+ Tambah Kata Baru")
+    local listK = ListView(service)
+
+    local function refK()
+      local s, d = pcall(cjson.decode, getPref("kamus_json", "{}"))
+      if not s or type(d) ~= "table" then d = {} end
+      local keys, disp = {}, {}
+      for k, v in pairs(d) do
+        table.insert(keys, k)
+        table.insert(disp, k .. " -> " .. v)
+      end
+      listK.setAdapter(ArrayAdapter(service, android.R.layout.simple_list_item_1, disp))
+      return keys, d
+    end
+
+    listK.setOnItemClickListener{onItemClick=function(parent, view, pos, id)
+      local keys, data = refK()
+      local kataAsli = keys[pos+1]
+      local kataGanti = data[kataAsli]
+
+      local layOpt = LinearLayout(service).setOrientation(1).setPadding(40,20,40,20)
+      local tvInfo = TextView(service).setText("Kata: " .. kataAsli).setTextSize(16)
+      layOpt.addView(tvInfo)
+
+      local btnEdit = Button(service).setText("Edit")
+      local btnHapus = Button(service).setText("Hapus")
+      layOpt.addView(btnEdit)
+      layOpt.addView(btnHapus)
+
+      local dlgOpt = LuaDialog(service)
+      dlgOpt.setTitle("Opsi Kamus")
+      dlgOpt.setView(layOpt)
+      dlgOpt.setNegativeButton("Batal", {onClick=function(d) d.dismiss() end})
+      dlgOpt.show()
+
+      btnEdit.setOnClickListener(function()
+        dlgOpt.dismiss()
+        local layEdit = LinearLayout(service).setOrientation(1).setPadding(40,20,40,20)
+        local e1 = EditText(service).setText(kataAsli)
+        local e2 = EditText(service).setText(kataGanti)
+        layEdit.addView(e1)
+        layEdit.addView(e2)
+
+        local dlgEdit = LuaDialog(service)
+        dlgEdit.setTitle("Edit Kamus")
+        dlgEdit.setView(layEdit)
+        dlgEdit.setPositiveButton("Simpan", {onClick=function()
+          data[kataAsli] = nil
+          local newK = e1.getText().toString():match("^%s*(.-)%s*$")
+          local newV = e2.getText().toString()
+          data[newK] = newV
+          setPref("kamus_json", cjson.encode(data))
+          refK()
+          commitPrefs()
+          pesan("Kamus diperbarui")
+          dlgEdit.dismiss()
+        end})
+        dlgEdit.setNegativeButton("Batal", {onClick=function(d) d.dismiss() end})
+        dlgEdit.show()
+      end)
+
+      btnHapus.setOnClickListener(function()
+        dlgOpt.dismiss()
+        data[kataAsli] = nil
+        setPref("kamus_json", cjson.encode(data))
+        refK()
+        commitPrefs()
+        pesan("Terhapus: " .. kataAsli)
+      end)
+    end}
+
+    btnKAdd.setOnClickListener(function()
+      local layAdd = LinearLayout(service).setOrientation(1).setPadding(40,20,40,20)
+      local e1 = EditText(service).setHint("Kata Asli")
+      local e2 = EditText(service).setHint("Kata Pengganti")
+      layAdd.addView(e1)
+      layAdd.addView(e2)
+
+      local dlgAdd = LuaDialog(service)
+      dlgAdd.setTitle("Tambah Kamus")
+      dlgAdd.setView(layAdd)
+      dlgAdd.setPositiveButton("Simpan", {onClick=function()
+        local s, d = pcall(cjson.decode, getPref("kamus_json", "{}"))
+        if not s or type(d) ~= "table" then d = {} end
+        local newK = e1.getText().toString():match("^%s*(.-)%s*$")
+        local newV = e2.getText().toString()
+        d[newK] = newV
+        setPref("kamus_json", cjson.encode(d))
+        refK()
+        commitPrefs()
+        pesan("Kata baru ditambahkan")
+        dlgAdd.dismiss()
+      end})
+      dlgAdd.setNegativeButton("Batal", {onClick=function(d) d.dismiss() end})
+      dlgAdd.show()
+    end)
+
+    layK.addView(btnKAdd)
+    layK.addView(listK)
+    refK()
+
+    local dlgKam = LuaDialog(service)
+    dlgKam.setTitle("Kamus Pribadi")
+    dlgKam.setView(layK)
+    dlgKam.setPositiveButton("Selesai", {onClick=function()
+      setBool("use_kamus", cbK.isChecked())
+      commitPrefs()
+      dlgKam.dismiss()
+    end})
+    dlgKam.show()
+  end)
+
+  -- Cadangkan & Pulihkan
+  local function getBackupPath()
+    return (getPref("backup_path", Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath())) .. "/VoiceInput_Backup.csv"
+  end
+  addBtn("Cadangkan & Pulihkan", function()
+    local layB = LinearLayout(service).setOrientation(1).setPadding(40,40,40,40)
+    local function showFolderPicker(cb)
+      local curPath = Environment.getExternalStorageDirectory().getAbsolutePath()
+      local function listFolder(path)
+        local f = File(path) local list = f.listFiles()
+        local folders = {".. (Kembali)"} local fullPaths = {f.getParentFile() and f.getParentFile().getAbsolutePath() or path}
+        if list then for i=0, #list-1 do local file = list[i] if file and file.isDirectory() then table.insert(folders, "📁 "..file.getName()) table.insert(fullPaths, file.getAbsolutePath()) end end end
+        local layF = LinearLayout(service).setOrientation(1).setPadding(20,20,20,20)
+        local listF = ListView(service)
+        local adapterF = ArrayAdapter(service, android.R.layout.simple_list_item_1, folders)
+        listF.setAdapter(adapterF)
+        layF.addView(listF)
+        local dlgF = LuaDialog(service)
+        dlgF.setTitle("Pilih Folder: "..path)
+        dlgF.setView(layF)
+        listF.setOnItemClickListener{onItemClick=function(parent, view, pos, id)
+          if pos == 0 then
+            listFolder(fullPaths[1])
+          else
+            listFolder(fullPaths[pos+1])
+          end
+          dlgF.dismiss()
+        end}
+        dlgF.setPositiveButton("Pilih Folder Ini", {onClick=function() cb(path) end})
+        dlgF.setNegativeButton("Batal", nil)
+        dlgF.show()
+      end
+      listFolder(curPath)
+    end
+    local btnInt = Button(service).setText("📷 Lokasi: "..getPref("backup_path", "Folder Download"))
+    btnInt.setOnClickListener(function() showFolderPicker(function(path) setPref("backup_path", path) btnInt.setText("Lokasi: "..path) pesan("Lokasi internal disimpan") end) end)
+    layB.addView(btnInt)
+    layB.addView(TextView(service).setText("\n--- Aksi Data ---").setGravity(Gravity.CENTER))
+    local btnBack = Button(service).setText("Cadangkan (CSV)")
+    btnBack.setOnClickListener(function()
+      local path = getBackupPath() local bf = File(path) if bf.exists() then bf.delete() end
+      local all = prefs.getAll() local it = all.entrySet().iterator() local data = {}
+      while it.hasNext() do local e = it.next() table.insert(data, tostring(e.getKey())..","..tostring(e.getValue())) end
+      local content = table.concat(data, "\n")
+      local ok = pcall(function() local f = io.open(path, "w") f:write(content) f:close() end)
+      if ok then pesan("Berhasil dicadangkan ke: "..path) else pesan("Gagal mencadangkan!") end
+    end)
+    layB.addView(btnBack)
+    local btnRest = Button(service).setText("Pulihkan (CSV)")
+    btnRest.setOnClickListener(function()
+      local path = getBackupPath() if not File(path).exists() then return pesan("File tidak ditemukan!") end
+      local ok = pcall(function()
+        for line in io.lines(path) do local k,v = line:match("([^,]+),(.+)") if k then if v == "true" then setBool(k, true) elseif v == "false" then setBool(k, false) else setPref(k, v) end end end
+      end)
+      if ok then
+        pesan("Berhasil memulihkan pengaturan. Silahkan kembali ke dialog utama. Lalu klik simpan. Untuk menyimpan pengaturan secara permanen. Jika tidak disimpan. Maka tamatlah.")
+      else
+        pesan("Gagal memulihkan.")
+      end
+    end)
+    layB.addView(btnRest)
+    local btnReset = Button(service).setText("Reset ke Setelan Pabrik").setTextColor(0xFFFF0000)
+    btnReset.setOnClickListener(function()
+      local dlgReset = LuaDialog(service)
+      dlgReset.setTitle("Konfirmasi Reset")
+      dlgReset.setMessage("Hapus semua pengaturan?")
+      dlgReset.setPositiveButton("Ya", {onClick=function()
+        prefs.edit().clear().apply() pesan("Setelan pabrik berhasil!") if mainDialog then mainDialog.dismiss() end
+      end})
+      dlgReset.setNegativeButton("Batal", nil)
+      dlgReset.show()
+    end)
+    layB.addView(btnReset)
+    local dlgB = LuaDialog(service)
+    dlgB.setTitle("Cadangkan & Pulihkan")
+    dlgB.setView(layB)
+    dlgB.setPositiveButton("Kembali ke dialog utama", nil)
+    dlgB.show()
+  end)
+
+  -- Akhir Kalimat & Custom
+  local layAkhir = LinearLayout(service).setOrientation(0).setGravity(Gravity.CENTER_VERTICAL).setPadding(10,10,10,10)
+  layAkhir.addView(TextView(service).setText("Akhir Kalimat: ").setPadding(20,0,0,0))
+  local opsiAkhir = {"Tidak Ada", "Spasi", "Garis Baru", "Custom"}
+  local spinAkhir = Spinner(service).setAdapter(ArrayAdapter(service, android.R.layout.simple_spinner_dropdown_item, opsiAkhir))
+  local curAkhir = getPref("akhir_kalimat_mode", "Tidak Ada")
+  for i,v in ipairs(opsiAkhir) do if v == curAkhir then spinAkhir.setSelection(i-1) break end end
+  layAkhir.addView(spinAkhir)
+  lay.addView(layAkhir)
+
+  local etCustomAkhir = EditText(service)
+  etCustomAkhir.setHint("Teks yang ditambahkan di akhir kalimat")
+  etCustomAkhir.setVisibility(View.GONE)
+  etCustomAkhir.setText(getPref("akhir_kalimat_custom", ""))
+  lay.addView(etCustomAkhir)
+
+  spinAkhir.setOnItemSelectedListener{onItemSelected=function(parent, view, pos, id)
+    local pilihan = opsiAkhir[pos+1]
+    setPref("akhir_kalimat_mode", pilihan)
+    if pilihan == "Custom" then
+      etCustomAkhir.setVisibility(View.VISIBLE)
     else
-        pesan = pesan .. "\n\nBelum ada tanda tangan custom. Buat dulu lewat menu Buat tanda tangan baru."
+      etCustomAkhir.setVisibility(View.GONE)
     end
+  end}
 
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Pilih tanda tangan")
-    b.setMessage(pesan)
-    b.setPositiveButton("gunakan tanda tangan asli", DialogInterface.OnClickListener{
-        onClick = function()
-            if service.speak then service.speak("Memakai tanda tangan asli.") end
-            lanjutBuild(false)
+  -- Panduan Penggunaan
+  local btnPanduan = Button(service)
+  btnPanduan.setText("Panduan Penggunaan")
+  btnPanduan.setOnClickListener(function()
+    local pScroll = ScrollView(service)
+    local pLay = LinearLayout(service).setOrientation(1).setPadding(40, 40, 40, 40)
+    pScroll.addView(pLay)
+    pLay.addView(TextView(service).setText("Selamat datang di Voice Input Alkausar. Terima kasih telah menggunakan karya dari saya."))
+    pLay.addView(TextView(service).setText([[
+PANDUAN PENGGUNAAN
+
+FITUR AI:
+- Memungkinkan kamu mengubah teks hasil dikte dengan bantuan AI.
+- Terdapat 3 provider: Gemini, Groq, dan ChatGPT Gratis.
+- Gemini dan Groq butuh API Key; ChatGPT Gratis tidak.
+- Kamu bisa memilih model AI dan mendapatkan API Key.
+
+FITUR TERJEMAHAN:
+- Aktifkan terjemahan untuk menerjemahkan hasil input suara.
+- Pilih bahasa asal (termasuk Deteksi Otomatis) dan bahasa tujuan.
+- Ada opsi "Terjemahkan dengan AI" untuk hasil lebih alami.
+
+FITUR EMOJI:
+- Menambahkan emoji pada teks hasil.
+- Jenis: Netral, Cewek, Cowok, Hujan, Ceria.
+- Posisi: Awal saja, Akhir saja, atau Awal & Akhir.
+
+FITUR LANJUTAN:
+- Mode AI (Online) atau Offline.
+- Mode Revisi Teks Terdahulu.
+- Dikte Berkelanjutan.
+- Baca Hasil Suara (TTS) beserta pengaturan mesin TTS, pitch, dan kecepatan.
+- Fitur Getaran dengan durasi yang bisa diatur.
+- Mode Tanpa Spasi, Mode Singkatan Nomor, Tanda Baca Brutal, dan Konfirmasi saat Klik.
+- Mode Hantu: mengubah teks menjadi sangat kasar dan marah sesuai input.
+- Memori Cerdas: mengingat percakapan sebelumnya, dengan Riwayat Chat yang bisa dihapus.
+- Pengaturan Gaya Vokal: AIUEO, A saja, I saja, Cadel C.
+- Akhir Kalimat: Tidak Ada, Spasi, Garis Baru, atau Custom (teks tambahan di akhir).
+
+FITUR KAMUS PRIBADI:
+- Menambah, mengedit, dan menghapus kata-kata untuk mengganti otomatis saat dikte.
+- Pastikan kotak "Aktifkan Kamus" dicentang agar penggantian berfungsi.
+
+FITUR CADANGKAN & PULIHKAN:
+- Menyimpan atau memulihkan semua pengaturan ke/dari file CSV.
+- Lokasi penyimpanan bisa dipilih.
+- Gunakan tombol "Kembali ke dialog utama" setelah memulihkan.
+
+CARA PENGGUNAAN:
+1. Buka aplikasi target dan fokus pada kotak teks.
+2. Aktifkan fitur input suara (biasanya dengan klik atau konfirmasi).
+3. Ucapkan kalimat, maka teks akan diproses sesuai pengaturan.
+4. Jika Mode AI aktif, hasil akan dirapikan atau diubah sesuai gaya.
+5. Jika Mode Hantu aktif, teks akan diubah menjadi kasar sesuai permintaan.
+6. Semua pengaturan dapat disesuaikan di menu utama dan disimpan.
+
+TEKAN TOMBOL PUTAR DI BAWAH UNTUK MENDENGARKAN PANDUAN INI SECARA AUDIO.
+]]))
+
+    local mediaPlay = nil
+    local btnPlay = Button(service).setText("▶ Putar Audio")
+    local btnStop = Button(service).setText("⏹ Hentikan Audio")
+    
+    btnPlay.setOnClickListener(function()
+      pcall(function()
+        if mediaPlay then 
+          mediaPlay.stop() 
+          mediaPlay.release() 
+          mediaPlay = nil 
         end
-    })
-    b.setNeutralButton("gunakan tanda tangan custom", DialogInterface.OnClickListener{
-        onClick = function()
-            if not adaCustom then
-                Toast.makeText(service, "Belum ada tanda tangan custom. Buat dulu di menu Buat tanda tangan baru.", Toast.LENGTH_LONG).show()
-                dialogPilihTandaTangan(fullName, token, kembali, lanjutBuild)
-                return
-            end
-            -- Pastikan credentials.properties ada di repo
-            local pass = prefs.getString(KEY_SIGN_STORE_PASS, "")
-            local keyPass = prefs.getString(KEY_SIGN_KEY_PASS, pass)
-            local namaFile = prefs.getString(KEY_SIGN_FILE, "release.jks")
-            local isiCred = "storePassword=" .. pass .. "\nkeyPassword=" .. keyPass .. "\nkeyAlias=" .. alias .. "\n"
-            local pathCred = "signing/credentials.properties"
-            local ep = "https://api.github.com/repos/" .. fullName .. "/contents/" .. pathCred
-            local function setelahCred()
-                if service.speak then service.speak("Memakai tanda tangan custom.") end
-                lanjutBuild(true)
-            end
-            kirimPermintaanGitHub("GET", ep, token, nil, function(ada, res)
-                local sha = nil
-                if ada then pcall(function() sha = JSONObject(res).optString("sha", "") end) end
-                if sha == "" then sha = nil end
-                local payload = JSONObject()
-                payload.put("message", "Perbarui credentials tanda tangan")
-                payload.put("content", Base64.encodeToString(String(isiCred).getBytes("UTF-8"), Base64.NO_WRAP))
-                if sha then payload.put("sha", sha) end
-                kirimPermintaanGitHub("PUT", ep, token, payload.toString(), function(ok, _)
-                    if not ok then
-                        Toast.makeText(service, "Gagal menulis credentials. Tetap mencoba build...", Toast.LENGTH_SHORT).show()
-                    end
-                    setelahCred()
-                end)
-            end, true)
+      end)
+      local audioPath = "/storage/emulated/0/解说/Plugin/imput alkausar/audiobooks 00"
+      local fObj = File(audioPath)
+      if fObj.exists() then
+        mediaPlay = MediaPlayer()
+        mediaPlay.setDataSource(audioPath)
+        mediaPlay.prepare()
+        mediaPlay.start()
+        pesan("Memutar audio panduan...")
+      else
+        pesan("File audio tidak ditemukan di direktori tersebut!")
+      end
+    end)
+    
+    btnStop.setOnClickListener(function()
+      pcall(function()
+        if mediaPlay then
+          mediaPlay.stop()
+          mediaPlay.release()
+          mediaPlay = nil
+          pesan("Audio dihentikan.")
         end
-    })
-    b.setNegativeButton("batal", DialogInterface.OnClickListener{
-        onClick = function() if kembali then kembali() end end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, "gunakan tanda tangan asli", "batal", "gunakan tanda tangan custom")
+      end)
+    end)
+    
+    pLay.addView(btnPlay)
+    pLay.addView(btnStop)
+    
+    local pDialog = LuaDialog(service)
+    pDialog.setTitle("Panduan Penggunaan")
+    pDialog.setView(pScroll)
+    pDialog.setNegativeButton("Tutup", {onClick=function()
+      pcall(function()
+        if mediaPlay then
+          mediaPlay.stop()
+          mediaPlay.release()
+          mediaPlay = nil
+        end
+      end)
+    end})
+    pDialog.show()
+  end)
+  lay.addView(btnPanduan)
+
+  -- Tentang Pengembang
+  local btnDev = Button(service)
+  btnDev.setText("Tentang")
+  btnDev.setOnClickListener(function()
+    local devLay = LinearLayout(service).setOrientation(1).setPadding(40, 40, 40, 40)
+    devLay.addView(TextView(service).setText("Developer by al-kausar"))
+    devLay.addView(TextView(service).setText("Terima kasih telah menggunakan karya dari saya. Bersama kita dapat mengatasi tantangan apa pun dengan semangat yang tak tergoyahkan. Jadikan setiap langkah kecil sebagai batu loncatan menuju impian besar Anda. Ingat, keberhasilan bukanlah tujuan akhir, melainkan perjalanan yang penuh pembelajaran dan pertumbuhan. Tetaplah positif, berbagi inspirasi, dan dukung satu sama lain dalam setiap kesempatan. 🌟🚀"))
+    devLay.addView(TextView(service).setText(""))
+    local rowJoin = LinearLayout(service).setOrientation(0)
+    devLay.addView(rowJoin)
+    local btnJoin = Button(service).setText("Hubungi Kausar di WhatsApp")
+    btnJoin.setOnClickListener(function()
+      local i = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/6282190840170"))
+      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      service.startActivity(i)
+    end)
+    rowJoin.addView(btnJoin)
+    local devDialog = LuaDialog(service)
+    devDialog.setTitle("Pengembang")
+    devDialog.setView(devLay)
+    devDialog.setNegativeButton("Tutup", nil)
+    devDialog.show()
+  end)
+  lay.addView(btnDev)
+
+  -- Tombol Simpan & Batal
+  local layTombol = LinearLayout(service).setOrientation(0).setPadding(0,10,0,0)
+  local btnSimpan = Button(service).setText("Simpan Konfigurasi")
+  btnSimpan.setOnClickListener(function() 
+    if etCustomAkhir and etCustomAkhir.getVisibility() == View.VISIBLE then
+      setPref("akhir_kalimat_custom", etCustomAkhir.getText().toString())
+    end
+    commitPrefs()
+    pesan("Pengaturan berhasil disimpan!") 
+    if mainDialog then mainDialog.dismiss() end 
+  end)
+  local btnBatal = Button(service).setText("Batal")
+  btnBatal.setOnClickListener(function() 
+    pesan("Perubahan dibatalkan.")
+    if mainDialog then mainDialog.dismiss() end 
+  end)
+  layTombol.addView(btnSimpan, LinearLayout.LayoutParams(0, -2, 1.0))
+  layTombol.addView(btnBatal, LinearLayout.LayoutParams(0, -2, 1.0))
+  lay.addView(layTombol)
+
+  mainDialog = LuaDialog(service)
+  mainDialog.setTitle("Menu utama")
+  mainDialog.setView(root)
+  mainDialog.show()
 end
 
-cariUnduhKeystore = function(repoObj, token)
-    local fullName = repoObj.optString("full_name", "")
-    local progress = ProgressDialog(service)
-    progress.setTitle("Mencari keystore")
-    progress.setMessage("Memindai berkas di repo...")
-    progress.setCancelable(true)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-
-    kirimPermintaanGitHub("GET", "https://api.github.com/repos/" .. fullName, token, nil, function(okRepo, resRepo)
-        if not okRepo then
-            pcall(function() progress.dismiss() end)
-            Toast.makeText(service, "Gagal membaca repo: " .. tostring(resRepo), Toast.LENGTH_LONG).show()
-            menuTandaTangan(repoObj, token)
-            return
-        end
-        local branch = "main"
-        pcall(function() branch = JSONObject(resRepo).optString("default_branch", "main") end)
-        local endpointTree = "https://api.github.com/repos/" .. fullName .. "/git/trees/" .. branch .. "?recursive=1"
-        kirimPermintaanGitHub("GET", endpointTree, token, nil, function(okTree, resTree)
-            pcall(function() progress.dismiss() end)
-            if not okTree then
-                Toast.makeText(service, "Gagal memindai berkas: " .. tostring(resTree), Toast.LENGTH_LONG).show()
-                menuTandaTangan(repoObj, token)
-                return
-            end
-
-            local daftar = {}
-            local items = {}
-            pcall(function()
-                local treeArr = JSONObject(resTree).optJSONArray("tree")
-                if treeArr ~= nil then
-                    for i = 0, treeArr.length() - 1 do
-                        local it = treeArr.getJSONObject(i)
-                        if it.optString("type", "") == "blob" then
-                            local p = it.optString("path", "")
-                            local lower = p:lower()
-                            if lower:find("%.jks$") or lower:find("%.keystore$") or lower:find("%.jks%.") then
-                                table.insert(daftar, p)
-                                table.insert(items, tostring(#daftar) .. ". " .. p)
-                            end
-                        end
-                    end
-                end
-            end)
-
-            if #daftar == 0 then
-                if service.speak then service.speak("Keystore tidak ditemukan di repo.") end
-                local d = AlertDialog.Builder(service)
-                d.setTitle("Keystore tidak ditemukan")
-                d.setMessage("Tidak ada berkas .jks atau .keystore di repo ini.\n\nUnggah keystore dari HP lewat menu Tanda tangan, atau pastikan file sudah ada di repo.")
-                d.setPositiveButton("unggah dari HP", DialogInterface.OnClickListener{
-                    onClick = function()
-                        pilihKeystoreDariHp(repoObj, token, Environment.getExternalStorageDirectory().getAbsolutePath())
-                    end
-                })
-                d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                    onClick = function() menuTandaTangan(repoObj, token) end
-                })
-                local diag = d.create()
-                diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                diag.show()
-                aturTombolHurufKecil(diag, "unggah dari HP", "kembali", nil)
-                return
-            end
-
-            if service.speak then service.speak("Ditemukan " .. #daftar .. " berkas keystore.") end
-            local b = AlertDialog.Builder(service)
-            b.setTitle("Pilih keystore (" .. #daftar .. ")")
-            b.setItems(items, DialogInterface.OnClickListener{
-                onClick = function(_, which)
-                    unduhKeystoreKeDownload(fullName, daftar[which + 1], token, function()
-                        menuTandaTangan(repoObj, token)
-                    end)
-                end
-            })
-            b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                onClick = function() menuTandaTangan(repoObj, token) end
-            })
-            local diag = b.create()
-            diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-            diag.show()
-            aturTombolHurufKecil(diag, nil, "kembali", nil)
-        end, true)
-    end, true)
+-- ==================== FUNGSI EKSEKUSI ====================
+local function runRevision(edit)
+  if not edit then pesan("Klik dulu di kotak teks!") return end
+  local currentText = ""
+  pcall(function()
+    if edit.getText() then currentText = tostring(edit.getText()) end
+  end)
+  if currentText == "" or currentText == "nil" then
+    pesan("Kotak teks kosong untuk direvisi!")
+    return
+  end
+  vibrate(60)
+  pesan("Sedang merapikan teks...")
+  replaceText(edit, "")
+  processText(currentText, function(hasil)
+    replaceText(edit, hasil)
+    speakText(hasil)
+  end)
 end
 
-unduhKeystoreKeDownload = function(fullName, pathBerkas, token, kembali)
-    local progress = ProgressDialog(service)
-    progress.setTitle("Mengunduh keystore")
-    progress.setMessage("Mengunduh " .. pathBerkas .. "...")
-    progress.setCancelable(true)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-    if service.speak then service.speak("Mengunduh berkas tanda tangan.") end
-
-    local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. pathBerkas:gsub(" ", "%%20")
-    kirimPermintaanGitHub("GET", endpoint, token, nil, function(ok, res)
-        if not ok then
-            pcall(function() progress.dismiss() end)
-            Toast.makeText(service, "Gagal mengunduh: " .. tostring(res), Toast.LENGTH_LONG).show()
-            if kembali then kembali() end
-            return
-        end
-
-        Thread(Runnable{
-            run = function()
-                local okSimpan, jalurAtauErr = pcall(function()
-                    local obj = JSONObject(res)
-                    local b64 = obj.optString("content", ""):gsub("%s+", "")
-                    local downloadUrl = obj.optString("download_url", "")
-                    local namaFile = pathBerkas:match("[^/]+$") or "keystore.jks"
-                    local downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                    if not downloadDir.exists() then downloadDir.mkdirs() end
-                    local target = File(downloadDir, namaFile)
-
-                    if b64 ~= "" and #b64 > 20 then
-                        local bytes = Base64.decode(b64, Base64.DEFAULT)
-                        local fos = FileOutputStream(target)
-                        fos.write(bytes)
-                        fos.flush()
-                        fos.close()
-                        return target.getAbsolutePath()
-                    end
-
-                    -- cadangan: unduh lewat download_url
-                    if downloadUrl == "" then error("Konten keystore kosong dan tidak ada tautan unduhan.") end
-                    local url = URL(downloadUrl)
-                    local conn = url.openConnection()
-                    conn.setRequestMethod("GET")
-                    conn.setRequestProperty("Authorization", "Bearer " .. token)
-                    conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                    conn.setConnectTimeout(20000)
-                    conn.setReadTimeout(60000)
-                    local code = conn.getResponseCode()
-                    if code >= 400 then error("Kode HTTP " .. tostring(code)) end
-                    local isStream = conn.getInputStream()
-                    local fos = FileOutputStream(target)
-                    local buf = String(string.rep(" ", 8192)).getBytes()
-                    local n = isStream.read(buf)
-                    while n ~= -1 do
-                        fos.write(buf, 0, n)
-                        n = isStream.read(buf)
-                    end
-                    fos.flush()
-                    fos.close()
-                    isStream.close()
-                    conn.disconnect()
-                    return target.getAbsolutePath()
-                end)
-
-                mainHandler.post(Runnable{
-                    run = function()
-                        pcall(function() progress.dismiss() end)
-                        if okSimpan then
-                            local jalur = tostring(jalurAtauErr)
-                            if service.speak then service.speak("Keystore tersimpan di folder Download.") end
-                            local d = AlertDialog.Builder(service)
-                            d.setTitle("Keystore berhasil diunduh")
-                            d.setMessage("Berkas tanda tangan disimpan di:\n\n" .. jalur .. "\n\nSimpan baik-baik. Update APK berikutnya harus memakai keystore ini agar tidak bentrok.")
-                            d.setPositiveButton("salin lokasi", DialogInterface.OnClickListener{
-                                onClick = function()
-                                    salinKeClipboard("Lokasi keystore", jalur)
-                                    if kembali then kembali() end
-                                end
-                            })
-                            d.setNeutralButton("buka folder Download", DialogInterface.OnClickListener{
-                                onClick = function()
-                                    pcall(function()
-                                        local i = Intent("android.intent.action.VIEW_DOWNLOADS")
-                                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        service.startActivity(i)
-                                    end)
-                                end
-                            })
-                            d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                                onClick = function() if kembali then kembali() end end
-                            })
-                            local diag = d.create()
-                            diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                            diag.show()
-                            aturTombolHurufKecil(diag, "salin lokasi", "kembali", "buka folder Download")
-                        else
-                            Toast.makeText(service, "Gagal menyimpan keystore: " .. tostring(jalurAtauErr), Toast.LENGTH_LONG).show()
-                            if kembali then kembali() end
-                        end
-                    end
-                })
-            end
-        }).start()
-    end, true)
-end
-
-pilihKeystoreDariHp = function(repoObj, token, pathSekarang)
-    local fullName = repoObj.optString("full_name", "")
-    local dir = File(pathSekarang)
-    local files = dir.listFiles()
-    local menuItems = {}
-    local dataItems = {}
-    local rootPath = Environment.getExternalStorageDirectory().getAbsolutePath()
-
-    if pathSekarang ~= rootPath and pathSekarang ~= "/" then
-        table.insert(menuItems, "Folder .. (kembali ke folder sebelumnya)")
-        table.insert(dataItems, {tipe = "kembali", path = dir.getParent()})
-    end
-
-    if files ~= nil then
-        local daftarFolder = {}
-        local daftarBerkas = {}
-        for i = 0, #files - 1 do
-            local f = files[i]
-            local nama = f.getName()
-            if not nama:find("^%.") then
-                if f.isDirectory() then
-                    table.insert(daftarFolder, f)
-                else
-                    local lower = nama:lower()
-                    if lower:find("%.jks$") or lower:find("%.keystore$") or lower:find("%.jks") then
-                        table.insert(daftarBerkas, f)
-                    end
-                end
-            end
-        end
-        table.sort(daftarFolder, function(a, b) return a.getName():lower() < b.getName():lower() end)
-        table.sort(daftarBerkas, function(a, b) return a.getName():lower() < b.getName():lower() end)
-        for _, f in ipairs(daftarFolder) do
-            table.insert(menuItems, "Folder " .. f.getName())
-            table.insert(dataItems, {tipe = "dir", file = f})
-        end
-        for _, f in ipairs(daftarBerkas) do
-            table.insert(menuItems, "Keystore " .. f.getName() .. " (" .. formatUkuranBerkas(f.length()) .. ")")
-            table.insert(dataItems, {tipe = "file", file = f})
-        end
-    end
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Pilih keystore: " .. dir.getName())
-    if #menuItems == 0 then
-        b.setMessage("Tidak ada folder atau berkas keystore di sini.")
-    else
-        b.setItems(menuItems, DialogInterface.OnClickListener{
-            onClick = function(_, which)
-                local item = dataItems[which + 1]
-                if item.tipe == "kembali" then
-                    pilihKeystoreDariHp(repoObj, token, item.path or rootPath)
-                elseif item.tipe == "dir" then
-                    pilihKeystoreDariHp(repoObj, token, item.file.getAbsolutePath())
-                elseif item.tipe == "file" then
-                    local terpilih = item.file
-                    local namaDiRepo = "signing/" .. terpilih.getName()
-                    local okB64, b64Data = pcall(function() return bacaBerkasKeBase64(terpilih) end)
-                    if not okB64 then
-                        Toast.makeText(service, "Gagal membaca keystore: " .. tostring(b64Data), Toast.LENGTH_SHORT).show()
-                        pilihKeystoreDariHp(repoObj, token, pathSekarang)
-                        return
-                    end
-                    local endpoint = "https://api.github.com/repos/" .. fullName .. "/contents/" .. namaDiRepo
-                    local function kirim(shaLama)
-                        local payload = JSONObject()
-                        payload.put("message", (shaLama and "Perbarui" or "Unggah") .. " keystore tanda tangan")
-                        payload.put("content", b64Data)
-                        if shaLama then payload.put("sha", shaLama) end
-                        kirimPermintaanGitHub("PUT", endpoint, token, payload.toString(), function(sukses, resPut)
-                            if sukses then
-                                if service.speak then service.speak("Keystore berhasil diunggah ke repo.") end
-                                local d = AlertDialog.Builder(service)
-                                d.setTitle("Keystore tersimpan di repo")
-                                d.setMessage("Lokasi di repo:\n" .. namaDiRepo .. "\n\nDisarankan repo tetap privat. Untuk update APK nanti, unduh lagi keystore ini lewat menu Tanda tangan.")
-                                d.setPositiveButton("oke", DialogInterface.OnClickListener{
-                                    onClick = function() menuTandaTangan(repoObj, token) end
-                                })
-                                local diag = d.create()
-                                diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                                diag.show()
-                                aturTombolHurufKecil(diag, "oke", nil, nil)
-                            else
-                                Toast.makeText(service, "Gagal unggah: " .. tostring(resPut), Toast.LENGTH_LONG).show()
-                                menuTandaTangan(repoObj, token)
-                            end
-                        end)
-                    end
-                    kirimPermintaanGitHub("GET", endpoint, token, nil, function(ada, resAda)
-                        local sha = nil
-                        if ada then
-                            pcall(function() sha = JSONObject(resAda).optString("sha", "") end)
-                            if sha == "" then sha = nil end
-                        end
-                        kirim(sha)
-                    end, true)
-                end
-            end
-        })
-    end
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() menuTandaTangan(repoObj, token) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-unduhRepoSebagaiZip = function(repoObj, token, kembali)
-    local fullName = repoObj.optString("full_name", "")
-    local namaRepo = repoObj.optString("name", "repo")
-    local defaultBranch = repoObj.optString("default_branch", "main")
-
-    local progress = ProgressDialog(service)
-    progress.setTitle("Mengunduh ZIP")
-    progress.setMessage("Mengunduh seluruh repo " .. namaRepo .. "...")
-    progress.setCancelable(true)
-    progress.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    progress.show()
-    if service.speak then service.speak("Mulai mengunduh repositori sebagai ZIP.") end
-
-    Thread(Runnable{
+local function runSpeech(edit)
+  if not edit then pesan("Klik dulu di kotak teks!") return end
+  vibrate(60)
+  local intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")
+  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+  
+  local rec = SpeechRecognizer.createSpeechRecognizer(service)
+  local silenceCount = 0
+  
+  local function checkAndRestart()
+    if getBool("use_continuous_mode") then
+      if silenceCount >= 2 then
+        pesan("Dikte terhenti otomatis (2x hening).")
+        pcall(function() rec.destroy() end)
+        return
+      end
+      Handler(Looper.getMainLooper()).postDelayed(Runnable({
         run = function()
-            local ok, hasil = pcall(function()
-                local urlStr = "https://api.github.com/repos/" .. fullName .. "/zipball/" .. defaultBranch
-                local url = URL(urlStr)
-                local conn = url.openConnection()
-                conn.setRequestMethod("GET")
-                conn.setRequestProperty("Authorization", "Bearer " .. token)
-                conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                conn.setRequestProperty("Accept", "application/vnd.github+json")
-                conn.setInstanceFollowRedirects(true)
-                conn.setConnectTimeout(20000)
-                conn.setReadTimeout(120000)
-
-                local respCode = conn.getResponseCode()
-                if respCode == 301 or respCode == 302 or respCode == 303 or respCode == 307 or respCode == 308 then
-                    local redir = conn.getHeaderField("Location")
-                    conn.disconnect()
-                    url = URL(redir)
-                    conn = url.openConnection()
-                    conn.setRequestMethod("GET")
-                    conn.setRequestProperty("User-Agent", "Android-Accessibility-Manager")
-                    conn.setConnectTimeout(20000)
-                    conn.setReadTimeout(120000)
-                    respCode = conn.getResponseCode()
-                end
-                if respCode >= 400 then
-                    error("Server menjawab kode " .. tostring(respCode))
-                end
-
-                local downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                if not downloadDir.exists() then downloadDir.mkdirs() end
-                local namaFile = namaRepo .. "-" .. defaultBranch .. ".zip"
-                local target = File(downloadDir, namaFile)
-                local isStream = conn.getInputStream()
-                local fos = FileOutputStream(target)
-                local buffer = String(string.rep(" ", 8192)).getBytes()
-                local n = isStream.read(buffer)
-                while n ~= -1 do
-                    fos.write(buffer, 0, n)
-                    n = isStream.read(buffer)
-                end
-                fos.flush()
-                fos.close()
-                isStream.close()
-                conn.disconnect()
-                return target.getAbsolutePath()
-            end)
-
-            mainHandler.post(Runnable{
-                run = function()
-                    pcall(function() progress.dismiss() end)
-                    if ok then
-                        local jalur = tostring(hasil)
-                        if service.speak then service.speak("Unduhan ZIP selesai.") end
-                        local d = AlertDialog.Builder(service)
-                        d.setTitle("ZIP berhasil diunduh")
-                        d.setMessage("Repo disimpan di folder Download:\n\n" .. jalur)
-                        d.setPositiveButton("salin lokasi", DialogInterface.OnClickListener{
-                            onClick = function() salinKeClipboard("Lokasi ZIP", jalur) end
-                        })
-                        d.setNeutralButton("buka folder Download", DialogInterface.OnClickListener{
-                            onClick = function()
-                                pcall(function()
-                                    local i = Intent("android.intent.action.VIEW_DOWNLOADS")
-                                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    service.startActivity(i)
-                                end)
-                            end
-                        })
-                        d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                            onClick = function() if kembali then kembali() end end
-                        })
-                        local diag = d.create()
-                        diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                        diag.show()
-                        aturTombolHurufKecil(diag, "salin lokasi", "kembali", "buka folder Download")
-                    else
-                        Toast.makeText(service, "Gagal unduh ZIP: " .. tostring(hasil), Toast.LENGTH_LONG).show()
-                        if kembali then kembali() end
-                    end
-                end
-            })
+          pcall(function() rec.startListening(intent) end)
         end
-    }).start()
-end
-
-menuIntisari = function(token)
-    local items = {
-        "1. Buat intisari baru",
-        "2. Kelola jis"
-    }
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Intisari")
-    b.setItems(items, DialogInterface.OnClickListener{
-        onClick = function(_, which)
-            if which == 0 then
-                buatIntisariBaru(token)
-            elseif which == 1 then
-                kelolaJisDialog(token)
-            end
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() menuUtama() end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-buatIntisariBaru = function(token)
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local lblNama = TextView(service)
-    lblNama.setText("Masukan nama scriptkamu disini")
-    layout.addView(lblNama)
-
-    local inputNama = EditText(service)
-    inputNama.setHint("contoh: main.lua")
-    inputNama.setSingleLine(true)
-    layout.addView(inputNama)
-
-    local lblScript = TextView(service)
-    lblScript.setText("Script")
-    lblScript.setPadding(0, 16, 0, 0)
-    layout.addView(lblScript)
-
-    local inputScript = EditText(service)
-    inputScript.setHint("Tempel atau ketik isi script di sini...")
-    inputScript.setMinLines(8)
-    layout.addView(inputScript)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Buat intisari baru")
-    b.setView(scroll)
-    b.setPositiveButton("buat jis", DialogInterface.OnClickListener{
-        onClick = function()
-            local nama = tostring(inputNama.getText()):match("^%s*(.-)%s*$")
-            local isi = tostring(inputScript.getText())
-            if nama == "" then
-                Toast.makeText(service, "Nama script wajib diisi!", Toast.LENGTH_SHORT).show()
-                buatIntisariBaru(token)
-                return
-            end
-            if isi == "" then
-                Toast.makeText(service, "Isi script tidak boleh kosong!", Toast.LENGTH_SHORT).show()
-                buatIntisariBaru(token)
-                return
-            end
-
-            local filesObj = JSONObject()
-            local fileMeta = JSONObject()
-            fileMeta.put("content", isi)
-            filesObj.put(nama, fileMeta)
-
-            local payload = JSONObject()
-            payload.put("description", "Intisari: " .. nama)
-            payload.put("public", true)
-            payload.put("files", filesObj)
-
-            kirimPermintaanGitHub("POST", "https://api.github.com/gists", token, payload.toString(), function(ok, res)
-                if not ok then
-                    local pesan = tostring(res)
-                    if pesan:find("403") or pesan:lower():find("gist") then
-                        pesan = pesan .. "\n\nPastikan token punya izin 'gist'. Buat token baru lewat menu Buat token di web."
-                    end
-                    Toast.makeText(service, "Gagal membuat jis: " .. pesan, Toast.LENGTH_LONG).show()
-                    menuIntisari(token)
-                    return
-                end
-
-                local rawUrl, htmlUrl, gistId = "", "", ""
-                pcall(function()
-                    local obj = JSONObject(res)
-                    gistId = obj.optString("id", "")
-                    htmlUrl = obj.optString("html_url", "")
-                    local files = obj.optJSONObject("files")
-                    if files ~= nil then
-                        local keys = files.keys()
-                        if keys.hasNext() then
-                            local k = keys.next()
-                            local f = files.optJSONObject(k)
-                            if f ~= nil then rawUrl = f.optString("raw_url", "") end
-                        end
-                    end
-                end)
-
-                if service.speak then service.speak("Jis berhasil dibuat.") end
-                local d = AlertDialog.Builder(service)
-                d.setTitle("Jis berhasil dibuat")
-                d.setMessage("Nama: " .. nama .. "\n\nTautan raw:\n" .. rawUrl .. "\n\nTautan web:\n" .. htmlUrl)
-                d.setPositiveButton("salin tautan raw", DialogInterface.OnClickListener{
-                    onClick = function()
-                        salinKeClipboard("Tautan raw jis", rawUrl)
-                        menuIntisari(token)
-                    end
-                })
-                d.setNeutralButton("buka di browser", DialogInterface.OnClickListener{
-                    onClick = function()
-                        if htmlUrl ~= "" then bukaBrowser(htmlUrl) end
-                        menuIntisari(token)
-                    end
-                })
-                d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-                    onClick = function() menuIntisari(token) end
-                })
-                local diag = d.create()
-                diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                diag.show()
-                aturTombolHurufKecil(diag, "salin tautan raw", "kembali", "buka di browser")
-            end)
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() menuIntisari(token) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "buat jis", "kembali", nil)
-end
-
-kelolaJisDialog = function(token)
-    kirimPermintaanGitHub("GET", "https://api.github.com/gists?per_page=50", token, nil, function(ok, res)
-        if not ok then
-            local pesan = tostring(res)
-            if pesan:find("403") or pesan:lower():find("gist") then
-                pesan = pesan .. "\n\nPastikan token punya izin 'gist'."
-            end
-            Toast.makeText(service, "Gagal memuat jis: " .. pesan, Toast.LENGTH_LONG).show()
-            menuIntisari(token)
-            return
-        end
-
-        local daftar = {}
-        local items = {}
-        pcall(function()
-            local arr = JSONArray(res)
-            for i = 0, arr.length() - 1 do
-                local g = arr.getJSONObject(i)
-                local id = g.optString("id", "")
-                local desc = g.optString("description", "")
-                local htmlUrl = g.optString("html_url", "")
-                local files = g.optJSONObject("files")
-                local namaFile = ""
-                local rawUrl = ""
-                if files ~= nil then
-                    local keys = files.keys()
-                    if keys.hasNext() then
-                        namaFile = tostring(keys.next())
-                        local f = files.optJSONObject(namaFile)
-                        if f ~= nil then rawUrl = f.optString("raw_url", "") end
-                    end
-                end
-                if desc == "" then desc = namaFile end
-                if desc == "" then desc = id end
-                table.insert(daftar, {
-                    id = id,
-                    desc = desc,
-                    htmlUrl = htmlUrl,
-                    namaFile = namaFile,
-                    rawUrl = rawUrl,
-                    filesObj = files
-                })
-                table.insert(items, tostring(#daftar) .. ". " .. desc .. (namaFile ~= "" and (" [" .. namaFile .. "]") or ""))
-            end
-        end)
-
-        if #daftar == 0 then
-            if service.speak then service.speak("Belum ada jis.") end
-            Toast.makeText(service, "Belum ada jis di akun ini.", Toast.LENGTH_SHORT).show()
-            menuIntisari(token)
-            return
-        end
-
-        if service.speak then service.speak("Ditemukan " .. #daftar .. " jis.") end
-        local b = AlertDialog.Builder(service)
-        b.setTitle("Kelola jis (" .. #daftar .. ")")
-        b.setItems(items, DialogInterface.OnClickListener{
-            onClick = function(_, which)
-                detailJisDialog(token, daftar[which + 1])
-            end
-        })
-        b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-            onClick = function() menuIntisari(token) end
-        })
-        local diag = b.create()
-        diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        diag.show()
-        aturTombolHurufKecil(diag, nil, "kembali", nil)
-    end)
-end
-
-detailJisDialog = function(token, item)
-    local judul = item.namaFile ~= "" and item.namaFile or (item.desc or "jis")
-    local opsi = {
-        "1. Buka berkas",
-        "2. Edit berkas",
-        "3. Salin tautan raw",
-        "4. Bagikan tautan raw",
-        "5. Buka di browser",
-        "6. Salin tautan web"
-    }
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Jis: " .. judul)
-    b.setItems(opsi, DialogInterface.OnClickListener{
-        onClick = function(_, which)
-            if which == 0 then
-                bukaIsiJis(token, item)
-            elseif which == 1 then
-                editIsiJis(token, item)
-            elseif which == 2 then
-                if item.rawUrl and item.rawUrl ~= "" then
-                    salinKeClipboard("Tautan raw jis", item.rawUrl)
-                else
-                    Toast.makeText(service, "Tautan raw tidak tersedia.", Toast.LENGTH_SHORT).show()
-                end
-                detailJisDialog(token, item)
-            elseif which == 3 then
-                if item.rawUrl and item.rawUrl ~= "" then
-                    bagikanTautan("Jis: " .. judul, item.rawUrl)
-                else
-                    Toast.makeText(service, "Tautan raw tidak tersedia.", Toast.LENGTH_SHORT).show()
-                end
-            elseif which == 4 then
-                if item.htmlUrl and item.htmlUrl ~= "" then bukaBrowser(item.htmlUrl) end
-            elseif which == 5 then
-                if item.htmlUrl and item.htmlUrl ~= "" then
-                    salinKeClipboard("Tautan web jis", item.htmlUrl)
-                else
-                    Toast.makeText(service, "Tautan web tidak tersedia.", Toast.LENGTH_SHORT).show()
-                end
-                detailJisDialog(token, item)
-            end
-        end
-    })
-    b.setNegativeButton("kembali", DialogInterface.OnClickListener{
-        onClick = function() kelolaJisDialog(token) end
-    })
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "kembali", nil)
-end
-
-bukaIsiJis = function(token, item)
-    if not item.id or item.id == "" then
-        Toast.makeText(service, "ID jis tidak valid.", Toast.LENGTH_SHORT).show()
-        detailJisDialog(token, item)
-        return
+      }), 400)
     end
-    kirimPermintaanGitHub("GET", "https://api.github.com/gists/" .. item.id, token, nil, function(ok, res)
-        if not ok then
-            Toast.makeText(service, "Gagal membuka jis: " .. tostring(res), Toast.LENGTH_LONG).show()
-            detailJisDialog(token, item)
-            return
-        end
-        local isi, nama = "", item.namaFile or "berkas"
-        pcall(function()
-            local obj = JSONObject(res)
-            local files = obj.optJSONObject("files")
-            if files ~= nil then
-                local keys = files.keys()
-                local target = item.namaFile
-                if target and target ~= "" and files.optJSONObject(target) ~= nil then
-                    local f = files.optJSONObject(target)
-                    isi = f.optString("content", "")
-                    nama = target
-                elseif keys.hasNext() then
-                    nama = tostring(keys.next())
-                    local f = files.optJSONObject(nama)
-                    if f ~= nil then isi = f.optString("content", "") end
-                end
+  end
+
+  rec.setRecognitionListener(luajava.createProxy("android.speech.RecognitionListener", {
+    onResults = function(res)
+      local list = res.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+      if list and list.size() > 0 then
+        silenceCount = 0
+        local hasilSuara = tostring(list.get(0))
+        processText(hasilSuara, function(hasil)
+          if getBool("use_continuous_mode") then
+            local curText = ""
+            pcall(function() if edit.getText() then curText = tostring(edit.getText()) end end)
+            if curText ~= "" and not curText:match("%s$") then
+              hasil = " " .. hasil
             end
+            service.insert(edit, hasil)
+          else
+            service.insert(edit, hasil)
+          end
+
+          if getBool("use_auto_tts") then
+            speakText(hasil)
+          end
+
+          checkAndRestart()
         end)
-        if isi == "" then
-            Toast.makeText(service, "Isi berkas kosong atau tidak bisa dibaca.", Toast.LENGTH_SHORT).show()
-            detailJisDialog(token, item)
-            return
-        end
-        local tv = TextView(service)
-        tv.setText(isi)
-        tv.setTextIsSelectable(true)
-        tv.setPadding(40, 20, 40, 20)
-        local scroll = ScrollView(service)
-        scroll.addView(tv)
-        local d = AlertDialog.Builder(service)
-        d.setTitle("Isi: " .. nama)
-        d.setView(scroll)
-        d.setPositiveButton("salin isi", DialogInterface.OnClickListener{
-            onClick = function()
-                salinKeClipboard("Isi jis", isi)
-                detailJisDialog(token, item)
-            end
-        })
-        d.setNeutralButton("salin tautan raw", DialogInterface.OnClickListener{
-            onClick = function()
-                if item.rawUrl and item.rawUrl ~= "" then
-                    salinKeClipboard("Tautan raw jis", item.rawUrl)
-                else
-                    Toast.makeText(service, "Tautan raw tidak tersedia.", Toast.LENGTH_SHORT).show()
-                end
-                detailJisDialog(token, item)
-            end
-        })
-        d.setNegativeButton("kembali", DialogInterface.OnClickListener{
-            onClick = function() detailJisDialog(token, item) end
-        })
-        local diag = d.create()
-        diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        diag.show()
-        aturTombolHurufKecil(diag, "salin isi", "kembali", "salin tautan raw")
-        if service.speak then service.speak("Berkas dibuka.") end
-    end)
-end
-
-editIsiJis = function(token, item)
-    if not item.id or item.id == "" then
-        Toast.makeText(service, "ID jis tidak valid.", Toast.LENGTH_SHORT).show()
-        detailJisDialog(token, item)
-        return
+      else
+        silenceCount = silenceCount + 1
+        checkAndRestart()
+      end
+    end,
+    onError = function(err)
+      if getBool("use_continuous_mode") then
+        silenceCount = silenceCount + 1
+        checkAndRestart()
+      else
+        pesan("Gagal mendengar.")
+      end
     end
-    kirimPermintaanGitHub("GET", "https://api.github.com/gists/" .. item.id, token, nil, function(ok, res)
-        if not ok then
-            Toast.makeText(service, "Gagal memuat jis: " .. tostring(res), Toast.LENGTH_LONG).show()
-            detailJisDialog(token, item)
-            return
-        end
-        local isi, nama = "", item.namaFile or "berkas.txt"
-        pcall(function()
-            local obj = JSONObject(res)
-            local files = obj.optJSONObject("files")
-            if files ~= nil then
-                local keys = files.keys()
-                local target = item.namaFile
-                if target and target ~= "" and files.optJSONObject(target) ~= nil then
-                    local f = files.optJSONObject(target)
-                    isi = f.optString("content", "")
-                    nama = target
-                elseif keys.hasNext() then
-                    nama = tostring(keys.next())
-                    local f = files.optJSONObject(nama)
-                    if f ~= nil then isi = f.optString("content", "") end
-                end
-            end
-        end)
-
-        local layout = LinearLayout(service)
-        layout.setOrientation(LinearLayout.VERTICAL)
-        layout.setPadding(40, 20, 40, 10)
-        local lbl = TextView(service)
-        lbl.setText("Edit: " .. nama)
-        layout.addView(lbl)
-        local editor = EditText(service)
-        editor.setText(isi)
-        editor.setMinLines(10)
-        editor.setGravity(0x30) -- top
-        layout.addView(editor)
-        local scroll = ScrollView(service)
-        scroll.setFillViewport(true)
-        scroll.addView(layout)
-
-        local d = AlertDialog.Builder(service)
-        d.setTitle("Edit berkas jis")
-        d.setView(scroll)
-        d.setPositiveButton("simpan", DialogInterface.OnClickListener{
-            onClick = function()
-                local baru = tostring(editor.getText())
-                local filesObj = JSONObject()
-                local fileMeta = JSONObject()
-                fileMeta.put("content", baru)
-                filesObj.put(nama, fileMeta)
-                local payload = JSONObject()
-                payload.put("files", filesObj)
-                kirimPermintaanGitHub("PATCH", "https://api.github.com/gists/" .. item.id, token, payload.toString(), function(ok2, res2)
-                    if ok2 then
-                        if service.speak then service.speak("Berkas jis disimpan.") end
-                        Toast.makeText(service, "Perubahan disimpan.", Toast.LENGTH_SHORT).show()
-                        -- perbarui raw url jika ada
-                        pcall(function()
-                            local obj2 = JSONObject(res2)
-                            local files2 = obj2.optJSONObject("files")
-                            if files2 ~= nil and files2.optJSONObject(nama) ~= nil then
-                                item.rawUrl = files2.optJSONObject(nama).optString("raw_url", item.rawUrl or "")
-                            end
-                        end)
-                        detailJisDialog(token, item)
-                    else
-                        Toast.makeText(service, "Gagal menyimpan: " .. tostring(res2), Toast.LENGTH_LONG).show()
-                        detailJisDialog(token, item)
-                    end
-                end)
-            end
-        })
-        d.setNegativeButton("batal", DialogInterface.OnClickListener{
-            onClick = function() detailJisDialog(token, item) end
-        })
-        local diag = d.create()
-        diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        diag.show()
-        aturTombolHurufKecil(diag, "simpan", "batal", nil)
-    end)
+  }))
+  rec.startListening(intent)
 end
 
-menuUtama = function()
-    local token = bacaToken()
-    if token == "" then
-        tampilkanDialogLogin()
-        return
-    end
+-- ==================== LOGIKA UTAMA ====================
+local edit = service.getEditText()
+if edit then
+  if getBool("use_revision_mode") then
+    runRevision(edit)
+  elseif getBool("use_confirmation") then
+    local layConfirm = LinearLayout(service).setOrientation(1).setPadding(40,20,40,20)
+    local btnStart = Button(service).setText("Mulai Input Suara")
+    local btnRev = Button(service).setText("Revisi Teks Tersebut")
+    local btnSettings = Button(service).setText("Buka Pengaturan")
+    layConfirm.addView(btnStart)
+    layConfirm.addView(btnRev)
+    layConfirm.addView(btnSettings)
 
-    local menuItems = {
-        "1. Repositori saya",
-        "2. Cari repositori",
-        "3. Buat repositori baru",
-        "4. Buat aplikasi (APK)",
-        "5. Intisari",
-        "6. Salin token saya",
-        "7. Buat token di web",
-        "8. Keluar akun"
-    }
+    local dlgConfirm = LuaDialog(service)
+    dlgConfirm.setTitle("Pilih Tindakan")
+    dlgConfirm.setView(layConfirm)
+    dlgConfirm.setNegativeButton("Batal", nil)
+    dlgConfirm.show()
 
-    local b = AlertDialog.Builder(service)
-    b.setTitle("gitHub kocak")
-    b.setItems(menuItems, DialogInterface.OnClickListener{
-        onClick = function(dialog, which)
-            if which == 0 then
-                daftarRepoSayaDialog(token)
-            elseif which == 1 then
-                cariRepoDialog(token)
-            elseif which == 2 then
-                buatRepoDialog(token)
-            elseif which == 3 then
-                PembuatAPK.menu(token)
-            elseif which == 4 then
-                menuIntisari(token)
-            elseif which == 5 then
-                salinKeClipboard("Token GitHub", token)
-            elseif which == 6 then
-                bukaBrowser(URL_GENERATE_TOKEN)
-            elseif which == 7 then
-                hapusToken()
-                if service.speak then service.speak("Token dihapus. Anda keluar.") end
-                Toast.makeText(service, "Token dihapus dari folder kautsar. Anda telah keluar.", Toast.LENGTH_SHORT).show()
-            end
-        end
-    })
-    b.setNegativeButton("tutup", nil)
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.show()
-    aturTombolHurufKecil(diag, nil, "tutup", nil)
+    btnStart.setOnClickListener(function() dlgConfirm.dismiss() runSpeech(edit) end)
+    btnRev.setOnClickListener(function() dlgConfirm.dismiss() runRevision(edit) end)
+    btnSettings.setOnClickListener(function() dlgConfirm.dismiss() showMain() end)
+  else
+    runSpeech(edit)
+  end
+else
+  showMain()
 end
-
-tampilkanDialogLogin = function()
-    local layout = LinearLayout(service)
-    layout.setOrientation(LinearLayout.VERTICAL)
-    layout.setPadding(40, 20, 40, 10)
-
-    local input = EditText(service)
-    input.setHint("Tempel token di sini")
-    input.setSingleLine(true)
-    layout.addView(input)
-
-    local scroll = ScrollView(service.getApplicationContext())
-    scroll.setFillViewport(true)
-    scroll.addView(layout)
-
-    local b = AlertDialog.Builder(service)
-    b.setTitle("Masuk akun GitHub")
-    b.setMessage("Masukkan token GitHub Anda. Belum punya token atau akun? Gunakan tombol di bawah:")
-    b.setView(scroll)
-
-    b.setPositiveButton("simpan token", DialogInterface.OnClickListener{
-        onClick = function()
-            local t = tostring(input.getText()):match("^%s*(.-)%s*$")
-            if t == "" then
-                Toast.makeText(service, "Token tidak boleh kosong!", Toast.LENGTH_SHORT).show()
-                return
-            end
-            if not simpanToken(t) then
-                Toast.makeText(service, "Gagal menyimpan token ke folder kautsar. Periksa izin penyimpanan.", Toast.LENGTH_LONG).show()
-                return
-            end
-            if service.speak then service.speak("Token disimpan di folder kautsar.") end
-            Toast.makeText(service, "Token disimpan di kautsar/token.txt", Toast.LENGTH_SHORT).show()
-            menuUtama()
-        end
-    })
-
-    b.setNeutralButton("dapatkan token di web", DialogInterface.OnClickListener{
-        onClick = function() bukaBrowser(URL_GENERATE_TOKEN) end
-    })
-
-    b.setNegativeButton("buat akun baru", DialogInterface.OnClickListener{
-        onClick = function() bukaBrowser(URL_DAFTAR_AKUN) end
-    })
-
-    local diag = b.create()
-    diag.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    diag.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    diag.show()
-    aturTombolHurufKecil(diag, "simpan token", "buat akun baru", "dapatkan token di web")
-end
-
-menuUtama()
